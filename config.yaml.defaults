@@ -1,0 +1,56 @@
+services:
+    external:
+        osg:
+            repo: https://github.com/mcoughlin/osg-skyportal-plugin.git
+            rev: main
+            params:
+                listener:
+                    host: 0.0.0.0
+                    port: 7100
+                htcondor:
+                    # Remote schedd to submit to. Leave null for the local schedd.
+                    collector: null   # e.g. "os-login.osg-htc.org"
+                    schedd: null      # set if multiple schedds; defaults to schedd advertised by collector
+                    # SciToken file used for Schedd authentication. Renew externally
+                    # (htvault-config / oidc-agent). The plugin reads it on every connect.
+                    scitoken_path: ~/.condor/tokens.d/osg.use
+                    # OSG accounting project (required by OSG for fair-share).
+                    project_name: GW-Astro
+                defaults:
+                    request_cpus: 1
+                    request_memory: 2048  # MB
+                    request_disk: 1024    # MB
+                    max_runtime_seconds: 3600
+                    # Singularity container with NMMA + deps. Set later; sleep spike doesn't use it.
+                    singularity_image: null
+                poller:
+                    # Seconds between condor_q sweeps. Bursty workloads → drop to 10-30.
+                    interval_seconds: 60
+                caps:
+                    # Reject submissions above these caps with HTTP 429.
+                    # null = no limit. Defaults are conservative; raise for production.
+                    max_concurrent_total: 50
+                    max_concurrent_per_analysis: 20
+                    max_concurrent_per_resource_per_analysis: 1
+                osdf:
+                    # Pelican origin prefix for per-job result bundles. The plugin
+                    # generates <output_prefix>/<uuid>.json on submit and the
+                    # wrapper PUTs to that URL on completion. Leave null to fall
+                    # back to scraping stdout via the schedd log.
+                    output_prefix: null   # e.g. https://origin.osg-htc.org/skyportal-osg
+                    # SciToken paths (Linux); the read token is also used by the
+                    # plugin's poller to fetch the bundle on completion. The write
+                    # token is shipped to the wrapper as BEARER_TOKEN_FILE.
+                    read_token_path: ~/.condor/tokens.d/osdf-read.use
+                    write_token_path: ~/.condor/tokens.d/osdf-write.use
+                # Per-job scratch dir (inputs.json, etc.). Created on demand.
+                staging_dir: staging
+                auth:
+                    # Bearer token SkyPortal must send on incoming /analysis/<name> requests.
+                    # Must match the AnalysisService row's _authinfo. Leave null to skip auth (dev).
+                    incoming_bearer_token: null
+                skyportal:
+                    # SkyPortal instance + token used by register_analysis_service.py to create
+                    # the AnalysisService row pointing at this plugin.
+                    base_url: http://localhost:5000
+                    api_token: replace_with_token_for_analysis_service_writes

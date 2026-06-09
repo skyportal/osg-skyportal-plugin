@@ -1,0 +1,41 @@
+[project]
+name = "osg"
+version = "0.1.0"
+description = "SkyPortal microservice for submitting analysis jobs to the OSG via HTCondor"
+authors = [
+  { name = "Michael Coughlin", email = "cough052@umn.edu" }
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "tornado>=6.4",
+  "pyyaml>=6.0",
+  "requests>=2.32",
+]
+
+[project.optional-dependencies]
+# Linux-only; the plugin imports htcondor lazily and the mac dev path skips it.
+osg = ["htcondor>=24.0"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[tool.compatibility]
+compatible-with = [
+  { name = "skyportal", version = ">=1.4.0" }
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
