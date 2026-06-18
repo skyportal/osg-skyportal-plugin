@@ -15,14 +15,25 @@ services:
                     # (htvault-config / oidc-agent). The plugin reads it on every connect.
                     scitoken_path: ~/.condor/tokens.d/osg.use
                     # OSG accounting project (required by OSG for fair-share).
-                    project_name: GW-Astro
+                    project_name: UMN_Coughlin
+                    # Spool the job sandbox to the AP on submit. Required for
+                    # remote submission (gives the job a valid Iwd + ships input
+                    # files); set false only if the plugin runs on the AP itself.
+                    spool: true
+                    # Remote-submission credential keepalive (OSG workaround):
+                    # on startup, park a /bin/true job held indefinitely so the
+                    # credmon keeps the SciToken fresh. Enable for REMOTE
+                    # submission; leave false when the plugin runs on the AP.
+                    keepalive: false
                 defaults:
                     request_cpus: 1
                     request_memory: 2048  # MB
                     request_disk: 1024    # MB
                     max_runtime_seconds: 3600
-                    # Singularity container with NMMA + deps. Set later; sleep spike doesn't use it.
-                    singularity_image: null
+                    # Lean fiesta-only Apptainer image (containers/fiesta.def),
+                    # staged to OSDF. Stamped onto wrapper jobs as +SingularityImage.
+                    # e.g. osdf:///ospool/ap41/data/<user>/fiesta-v1.sif
+                    singularity_image: osdf:///ospool/ap41/data/michael.coughlin/fiesta-v1.sif
                 poller:
                     # Seconds between condor_q sweeps. Bursty workloads → drop to 10-30.
                     interval_seconds: 60

@@ -48,8 +48,7 @@ def test_poll_marks_completed_via_history(plugin_cfg, fake_queue, fake_history):
 def test_poll_posts_callback_with_skyportal_shape(
     plugin_cfg, fake_queue, fake_history, tmp_path, monkeypatch
 ):
-    monkeypatch.chdir(tmp_path)  # logs/ writes here
-    (tmp_path / "logs").mkdir()
+    monkeypatch.chdir(tmp_path)  # output files write here
     cid = main.submit_job(
         plugin_cfg,
         analysis_name="x",
@@ -58,7 +57,7 @@ def test_poll_posts_callback_with_skyportal_shape(
         callback_method="POST",
         inputs={},
     )
-    (tmp_path / "logs" / f"job.{cid}.0.out").write_bytes(b"results-from-job\n")
+    (tmp_path / f"job.{cid}.0.out").write_bytes(b"results-from-job\n")
     fake_queue.clear()
     fake_history.append({"ClusterId": cid, "JobStatus": 4, "CompletionDate": 1700000000})
 
@@ -76,7 +75,6 @@ def test_poll_posts_callback_with_skyportal_shape(
 
 def test_poll_marks_held_job_failure_in_callback(plugin_cfg, fake_queue, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "logs").mkdir()
     cid = main.submit_job(
         plugin_cfg,
         analysis_name="x",
@@ -376,7 +374,6 @@ def test_build_callback_body_prefers_osdf_bundle(plugin_cfg, monkeypatch):
 
 def test_build_callback_body_falls_back_when_no_osdf(plugin_cfg, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "logs").mkdir()
     cid = main.submit_job(
         plugin_cfg,
         analysis_name="x",
@@ -385,12 +382,94 @@ def test_build_callback_body_falls_back_when_no_osdf(plugin_cfg, tmp_path, monke
         callback_method="POST",
         inputs={},
     )
-    (tmp_path / "logs" / f"job.{cid}.0.out").write_bytes(b"hi")
+    (tmp_path / f"job.{cid}.0.out").write_bytes(b"hi")
     rec = main.JOBS[cid]
     rec.status = "completed"
     body = main.build_callback_body(rec, plugin_cfg)
     assert body["status"] == "success"
     assert body["analysis"]["results"]["format"] == "text"
+
+
+def test_build_callback_body_parses_wrapper_bundle_from_stdout(plugin_cfg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cid = main.submit_job(
+        plugin_cfg,
+        analysis_name="x",
+        resource_id=None,
+        callback_url="http://cb",
+        callback_method="POST",
+        inputs={},
+    )
+    # Wrapper prints its SkyPortal bundle as the last stdout line (no OSDF).
+    wrapper_bundle = {"status": "success", "message": "lnZ=1.23", "analysis": {"results": {"x": 1}}}
+    (tmp_path / f"job.{cid}.0.out").write_text("NMMA chatter...\n" + json.dumps(wrapper_bundle))
+    rec = main.JOBS[cid]
+    rec.status = "completed"
+    assert main.build_callback_body(rec, plugin_cfg) == wrapper_bundle
+
+
+def test_submit_desc_is_remote_safe(plugin_cfg, last_submit_desc):
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="x",
+        resource_id=None,
+        callback_url=None,
+        callback_method="POST",
+        inputs={},
+    )
+    # Target OSPool Linux/x86_64; don't ship the local executable.
+    assert last_submit_desc["requirements"] == '(Arch == "X86_64") && (OpSys == "LINUX")'
+    assert last_submit_desc["transfer_executable"] == "False"
+    # The schedd event log violates OSPool's home-dir policy for remote submit.
+    assert "log" not in last_submit_desc
+    # Basenames (no logs/ subdir) so spool retrieves them to cwd.
+    assert last_submit_desc["output"] == "job.$(ClusterId).$(ProcId).out"
+    # Explicit units: bare RequestDisk is KiB in HTCondor.
+    assert last_submit_desc["request_disk"].endswith("MB")
+    assert last_submit_desc["request_memory"].endswith("MB")
+
+
+def test_spool_defaults_on_and_is_configurable(plugin_cfg):
+    cid = main.submit_job(
+        plugin_cfg,
+        analysis_name="x",
+        resource_id=None,
+        callback_url=None,
+        callback_method="POST",
+        inputs={},
+    )
+    assert main.JOBS[cid].spooled is True  # htcondor.spool defaults true
+
+    plugin_cfg["htcondor"]["spool"] = False
+    cid2 = main.submit_job(
+        plugin_cfg,
+        analysis_name="x",
+        resource_id=None,
+        callback_url=None,
+        callback_method="POST",
+        inputs={},
+    )
+    assert main.JOBS[cid2].spooled is False
+
+
+def test_wrapper_mode_via_config_default(plugin_cfg, last_submit_desc, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    plugin_cfg["defaults"]["use_wrapper"] = True
+    plugin_cfg["staging_dir"] = str(tmp_path / "stg")
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="nmma_osg",
+        resource_id="ZTF1",
+        callback_url=None,
+        callback_method="POST",
+        inputs={},
+    )
+    # Wrapper mode forced by config: ships the wrapper + bridge + inputs.json, runs python3.
+    assert last_submit_desc["executable"] == "/usr/bin/python3"
+    transfer = last_submit_desc["transfer_input_files"]
+    assert "fiesta_wrapper.py" in transfer
+    assert "fiesta_bridge.py" in transfer
+    assert "initialdir" not in last_submit_desc  # spool owns the sandbox
 
 
 def test_rehydrate_is_idempotent(plugin_cfg, fake_queue):
@@ -409,6 +488,27 @@ def test_rehydrate_is_idempotent(plugin_cfg, fake_queue):
     main.rehydrate_jobs(plugin_cfg)
     main.rehydrate_jobs(plugin_cfg)  # should not double-adopt
     assert len(main.JOBS) == 1
+
+
+def test_ensure_keepalive_disabled_is_noop(plugin_cfg, fake_queue):
+    plugin_cfg["htcondor"].pop("keepalive", None)
+    main.ensure_keepalive(plugin_cfg)
+    assert fake_queue == []
+
+
+def test_ensure_keepalive_submits_held_marker_job(plugin_cfg, fake_queue, last_submit_desc):
+    plugin_cfg["htcondor"]["keepalive"] = True
+    try:
+        main.ensure_keepalive(plugin_cfg)
+        assert last_submit_desc["hold"] == "true"
+        assert last_submit_desc["+SkyPortalKeepalive"] == "true"
+        assert last_submit_desc["executable"] == "/bin/true"
+        assert len(fake_queue) == 1
+        # Idempotent: a second call sees the queued job and adds nothing.
+        main.ensure_keepalive(plugin_cfg)
+        assert len(fake_queue) == 1
+    finally:
+        plugin_cfg["htcondor"].pop("keepalive", None)
 
 
 if __name__ == "__main__":

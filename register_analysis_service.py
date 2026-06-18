@@ -17,7 +17,6 @@ import json
 import sys
 
 import requests
-from baselayer.app.env import load_env
 
 
 def parse_args():
@@ -47,6 +46,8 @@ def parse_args():
         help="optional_analysis_parameters as JSON (string of dict)",
     )
     p.add_argument("--group-ids", nargs="+", type=int, default=[])
+    p.add_argument("--token", default=None, help="SkyPortal API token (else from config)")
+    p.add_argument("--base-url", default=None, help="SkyPortal base URL (else from config)")
     p.add_argument(
         "--bearer",
         default=None,
@@ -58,17 +59,25 @@ def parse_args():
 
 def main():
     args = parse_args()
-    _, cfg = load_env()
-    params = cfg["services.external.osg.params"]
-    base = params["skyportal"]["base_url"].rstrip("/")
-    api_token = params["skyportal"]["api_token"]
-    if not api_token or api_token.startswith("replace_with"):
-        print(
-            "error: set services.external.osg.params.skyportal.api_token in config", file=sys.stderr
-        )
-        sys.exit(2)
+    # --token/--base-url bypass load_env so this runs without the skyportal config.
+    if args.token and args.base_url:
+        base = args.base_url.rstrip("/")
+        api_token = args.token
+        bearer = args.bearer
+    else:
+        from baselayer.app.env import load_env  # needs PYTHONPATH=<skyportal>
 
-    bearer = args.bearer or params.get("auth", {}).get("incoming_bearer_token")
+        _, cfg = load_env()
+        params = cfg["services.external.osg.params"]
+        base = params["skyportal"]["base_url"].rstrip("/")
+        api_token = params["skyportal"]["api_token"]
+        if not api_token or api_token.startswith("replace_with"):
+            print(
+                "error: set services.external.osg.params.skyportal.api_token in config",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        bearer = args.bearer or params.get("auth", {}).get("incoming_bearer_token")
     auth_payload = {"header_token": {"Authorization": f"Bearer {bearer}"}} if bearer else {}
 
     body = {

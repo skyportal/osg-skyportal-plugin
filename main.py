@@ -59,6 +59,7 @@ class JobRecord:
     hold_reason: str | None = None
     callback_posted: bool = False
     osdf_output_url: str | None = None
+    spooled: bool = False
     inputs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -96,9 +97,29 @@ def check_caps(cfg: dict, analysis_name: str, resource_id: str | None) -> str | 
     return None
 
 
+def _htcondor():
+    """Lazy, version-tolerant import: v1 on Linux APs, v2 (htcondor2) on macOS/conda."""
+    try:
+        import htcondor
+    except ModuleNotFoundError:
+        import htcondor2 as htcondor
+    return htcondor
+
+
+def _commit_submit(schedd, sub, spool: bool) -> int:
+    """Queue one job, returning its cluster id. htcondor2 has no transaction()."""
+    if hasattr(schedd, "transaction"):  # htcondor v1 / test fake
+        with schedd.transaction() as txn:
+            return sub.queue(txn, count=1)
+    result = schedd.submit(sub, count=1, spool=spool)  # htcondor2
+    if spool:
+        schedd.spool(result)  # push the input sandbox to the AP
+    return result.cluster()
+
+
 def get_schedd(cfg: dict):
     """Connect to the configured Condor schedd. SciToken via BEARER_TOKEN_FILE."""
-    import htcondor
+    htcondor = _htcondor()
 
     token_path = os.path.expanduser(cfg["htcondor"]["scitoken_path"])
     if os.path.exists(token_path):
@@ -119,18 +140,60 @@ def get_schedd(cfg: dict):
     return htcondor.Schedd(ad)
 
 
+def ensure_keepalive(cfg: dict) -> None:
+    """Park a placeholder job on the AP, held indefinitely, so the credmon keeps
+    the SciToken fresh for remote submission (OSG workaround, support ticket).
+
+    Idempotent — no-op if our keepalive job is already queued. Only matters for
+    remote submission; harmless when the plugin runs on the AP. Gated on
+    ``htcondor.keepalive`` so on-AP deployments needn't park a job.
+    """
+    if not cfg["htcondor"].get("keepalive", False):
+        return
+    schedd = get_schedd(cfg)
+    existing = list(schedd.query(constraint="SkyPortalKeepalive == true", projection=["ClusterId"]))
+    if existing:
+        log(f"keepalive job already queued (cluster {existing[0]['ClusterId']})")
+        return
+    htcondor = _htcondor()
+    # /bin/true, held on submit: it never runs, it just keeps a job in the queue
+    # referencing the scitokens credential so the credmon keeps refreshing it.
+    sub = htcondor.Submit(
+        {
+            "executable": "/bin/true",
+            "transfer_executable": "False",
+            "hold": "true",
+            "+SkyPortalKeepalive": "true",
+            "requirements": '(Arch == "X86_64") && (OpSys == "LINUX")',
+            "request_cpus": "1",
+            "request_memory": "16MB",
+            "request_disk": "16MB",
+            "+ProjectName": f'"{cfg["htcondor"]["project_name"]}"',
+        }
+    )
+    cluster = _commit_submit(schedd, sub, spool=False)
+    log(f"submitted held keepalive job (cluster {cluster})")
+
+
 def _stage_wrapper_job(
     cfg: dict, params: dict, inputs: dict, cluster_uuid: str
 ) -> tuple[dict, str | None]:
     """Build submit overrides + an OSDF output URL when wrapper-mode is requested."""
-    if not params.get("use_wrapper"):
+    # Wrapper mode can be forced per-service via config (an NMMA service always
+    # wraps) or requested per-job via analysis_parameters.
+    use_wrapper = params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
+    if not use_wrapper:
         return {}, None
 
-    staging_root = Path(cfg.get("staging_dir", "staging"))
+    # Absolute paths: with spool, HTCondor resolves relative transfer paths
+    # against Iwd, which doubles them (staging/uuid/staging/uuid/...).
+    staging_root = Path(cfg.get("staging_dir", "staging")).resolve()
     job_dir = staging_root / cluster_uuid
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "inputs.json").write_text(json.dumps(inputs))
-    wrapper_src = Path(__file__).parent / "nmma_wrapper.py"
+    plugin_dir = Path(__file__).parent
+    wrapper_src = (plugin_dir / "fiesta_wrapper.py").resolve()
+    bridge_src = (plugin_dir / "fiesta_bridge.py").resolve()
 
     output_url = None
     osdf_cfg = cfg.get("osdf") or {}
@@ -144,13 +207,14 @@ def _stage_wrapper_job(
     if osdf_cfg.get("write_token_path"):
         env_parts.append(f"BEARER_TOKEN_FILE={osdf_cfg['write_token_path']}")
 
+    # No initialdir: let Iwd default to the plugin cwd so spooled output files
+    # (basenames) are retrieved next to where the poller reads them.
     overrides = {
         "executable": "/usr/bin/python3",
-        "arguments": "nmma_wrapper.py",
-        "transfer_input_files": f"{wrapper_src},{job_dir}/inputs.json",
+        "arguments": "fiesta_wrapper.py",
+        "transfer_input_files": f"{wrapper_src},{bridge_src},{job_dir / 'inputs.json'}",
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
-        "initialdir": str(job_dir),
     }
     if env_parts:
         overrides["environment"] = '"' + " ".join(env_parts) + '"'
@@ -166,13 +230,10 @@ def submit_job(
     inputs: dict[str, Any],
 ) -> int:
     """Submit one job. `inputs` may carry `analysis_parameters` and the SkyPortal-staged CSVs."""
-    import htcondor
+    htcondor = _htcondor()
 
     defaults = cfg["defaults"]
     schedd = get_schedd(cfg)
-
-    logs_dir = Path("logs")
-    logs_dir.mkdir(exist_ok=True)
 
     params = inputs.get("analysis_parameters", {}) or {}
     cluster_uuid = uuid.uuid4().hex
@@ -180,15 +241,24 @@ def submit_job(
 
     submit_desc: dict[str, str] = {
         "executable": params.get("executable", "/bin/sleep"),
+        # The executable lives on the worker / in the container; don't ship this
+        # host's copy (wrong arch/OS → ExitCode 126).
+        "transfer_executable": "False",
         "arguments": params.get("arguments", "60"),
-        "output": "logs/job.$(ClusterId).$(ProcId).out",
-        "error": "logs/job.$(ClusterId).$(ProcId).err",
-        "log": "logs/job.$(ClusterId).log",
+        # Basenames (no subdir): spool retrieves them to Iwd (cwd), where the
+        # poller reads them. No `log =`: the schedd event log must live in the
+        # AP home dir for remote OSPool submission, and the plugin doesn't use it.
+        "output": "job.$(ClusterId).$(ProcId).out",
+        "error": "job.$(ClusterId).$(ProcId).err",
         "request_cpus": str(params.get("request_cpus", defaults["request_cpus"])),
-        "request_memory": str(params.get("request_memory", defaults["request_memory"])),
-        "request_disk": str(params.get("request_disk", defaults["request_disk"])),
+        # Config values are MB; give explicit units since a bare RequestDisk is
+        # KiB in HTCondor (RequestMemory is MiB) — easy to get wrong.
+        "request_memory": f"{params.get('request_memory', defaults['request_memory'])}MB",
+        "request_disk": f"{params.get('request_disk', defaults['request_disk'])}MB",
         "+ProjectName": f'"{cfg["htcondor"]["project_name"]}"',
-        "requirements": '(OSG == True) && (Arch == "X86_64")',
+        # Target OSPool's Linux/x86_64 glideins. Bindings submission from a
+        # non-Linux host otherwise defaults requirements to the local platform.
+        "requirements": '(Arch == "X86_64") && (OpSys == "LINUX")',
     }
     submit_desc["+MaxRuntime"] = str(
         int(params.get("max_runtime_seconds", defaults["max_runtime_seconds"]))
@@ -204,9 +274,12 @@ def submit_job(
     if osdf_output_url:
         submit_desc["+SkyPortalOsdfOutput"] = f'"{osdf_output_url}"'
 
+    # Remote AP submission must spool: otherwise Iwd defaults to this host's cwd
+    # (nonexistent on the AP → held) and input files never reach the sandbox.
+    # Set htcondor.spool=false only when the plugin runs co-located on the AP.
+    needs_spool = bool(cfg["htcondor"].get("spool", True))
     sub = htcondor.Submit(submit_desc)
-    with schedd.transaction() as txn:
-        cluster_id = sub.queue(txn, count=1)
+    cluster_id = _commit_submit(schedd, sub, spool=needs_spool)
 
     JOBS[cluster_id] = JobRecord(
         cluster_id=cluster_id,
@@ -215,6 +288,7 @@ def submit_job(
         callback_url=callback_url,
         callback_method=callback_method,
         osdf_output_url=osdf_output_url,
+        spooled=needs_spool,
         inputs=inputs,
     )
     log(f"submitted cluster_id={cluster_id} analysis={analysis_name} resource_id={resource_id}")
@@ -283,10 +357,20 @@ def rehydrate_jobs(cfg: dict, history_hours: float = 24.0) -> int:
     return adopted
 
 
+def _retrieve_outputs(schedd, rec: JobRecord) -> None:
+    """Pull a spooled job's output sandbox back from the AP into logs/. No-op for the test fake."""
+    if not rec.spooled or not hasattr(schedd, "retrieve"):
+        return
+    try:
+        schedd.retrieve(f"ClusterId == {rec.cluster_id}")
+    except Exception as e:  # noqa: BLE001 — fall back to whatever's on disk
+        log(f"retrieve failed for cluster_id={rec.cluster_id}: {e!r}")
+
+
 def collect_outputs(rec: JobRecord) -> dict[str, Any]:
     """Stdout/stderr fallback when no OSDF bundle exists."""
-    stdout_path = Path(f"logs/job.{rec.cluster_id}.0.out")
-    stderr_path = Path(f"logs/job.{rec.cluster_id}.0.err")
+    stdout_path = Path(f"job.{rec.cluster_id}.0.out")
+    stderr_path = Path(f"job.{rec.cluster_id}.0.err")
     payload: dict[str, Any] = {}
     if stdout_path.exists():
         payload["results"] = {
@@ -314,9 +398,27 @@ def fetch_osdf_bundle(rec: JobRecord, cfg: dict) -> dict | None:
         return None
 
 
+def _read_stdout_bundle(rec: JobRecord) -> dict | None:
+    """Parse the wrapper's SkyPortal bundle from its stdout (printed as the last JSON line)."""
+    stdout_path = Path(f"job.{rec.cluster_id}.0.out")
+    if not stdout_path.exists():
+        return None
+    for line in reversed(stdout_path.read_text(errors="replace").splitlines()):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return None  # last line isn't the bundle; let collect_outputs scrape it
+        return obj if isinstance(obj, dict) and obj.get("status") else None
+    return None
+
+
 def build_callback_body(rec: JobRecord, cfg: dict | None = None) -> dict:
     """Construct the SkyPortal-shaped body to POST back to callback_url."""
     bundle = fetch_osdf_bundle(rec, cfg) if cfg is not None else None
+    if not (bundle and isinstance(bundle, dict) and bundle.get("status")):
+        bundle = _read_stdout_bundle(rec)  # spool/no-OSDF path: wrapper bundle is in stdout
     if bundle and isinstance(bundle, dict) and bundle.get("status"):
         return bundle
     is_success = rec.status == "completed" and rec.hold_reason is None
@@ -389,6 +491,8 @@ def poll_once(cfg: dict) -> None:
     for cid in cluster_ids:
         rec = JOBS[cid]
         if rec.status in TERMINAL and not rec.callback_posted:
+            if rec.status == "completed":
+                _retrieve_outputs(schedd, rec)
             rec.callback_posted = post_callback(rec, cfg)
 
 
@@ -499,6 +603,10 @@ async def amain():
         rehydrate_jobs(cfg)
     except Exception as e:  # noqa: BLE001 — startup must continue even if schedd is briefly down
         log(f"rehydrate failed (continuing with empty JOBS): {e!r}")
+    try:
+        ensure_keepalive(cfg)
+    except Exception as e:  # noqa: BLE001 — keepalive is best-effort, never block startup
+        log(f"keepalive setup failed (continuing): {e!r}")
     app = build_app(cfg)
     app.listen(int(cfg["listener"]["port"]), address=cfg["listener"]["host"])
     log(f"listening on {cfg['listener']['host']}:{cfg['listener']['port']}")

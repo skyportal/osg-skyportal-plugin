@@ -1,20 +1,17 @@
 """
-NMMA wrapper script — runs inside an HTCondor job on an OSG worker.
+Fiesta wrapper script — runs inside the fiesta runtime image on an OSG worker.
 
 Contract:
 - Reads ``inputs.json`` from cwd (staged by HTCondor file transfer).
-- Runs NMMA's EM analysis (mirroring skyportal/skyportal#3199), OR a stub if
-  ``analysis_parameters.dry_run`` is true.
-- Bundles the result as a SkyPortal-shaped JSON
-  ``{status, message, analysis: {results, plots, log}}``.
-- Uploads the bundle to ``$OSDF_OUTPUT_URL`` via plain HTTPS PUT
-  (bearer-authenticated with ``$BEARER_TOKEN`` or ``$BEARER_TOKEN_FILE``).
-- Also writes the bundle to stdout so the plugin's poller can fall back to
-  scraping the schedd log if OSDF is unreachable.
-
-Real NMMA work behind a lazy import so this module is unit-testable on a
-machine without NMMA installed.
+- Fits a Fiesta model via ``fiesta_bridge`` (shipped alongside this file), OR a
+  stub if ``analysis_parameters.dry_run`` is true.
+- Bundles the result as SkyPortal's analysis-callback JSON
+  ``{status, message, analysis: {results, plots, model_lightcurve}}``.
+- Optionally PUTs the bundle to ``$OSDF_OUTPUT_URL``; always writes it to stdout
+  so the plugin's poller can scrape it.
 """
+
+from __future__ import annotations  # OSPool workers may run older Python; keep PEP 604 unions lazy
 
 import base64
 import json
@@ -24,36 +21,52 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-import requests
+try:
+    import requests  # only needed for OSDF upload; bare workers may lack it
+except ImportError:
+    requests = None
 
 
 def load_inputs(path: Path = Path("inputs.json")) -> dict:
     return json.loads(path.read_text())
 
 
-def run_nmma(inputs: dict) -> dict:
-    """Invoke NMMA. Returns a dict with ``log_bayes_factor`` plus output paths on success.
-
-    Lazy-imports NMMA so this module is importable on hosts without it.
+def _materialize_inputs(inputs: dict) -> dict:
+    """SkyPortal sends photometry/redshift as CSV *content*; fiesta wants file
+    paths. Write any inline CSV (multi-line string) to a file in cwd and point
+    the payload at it. A bare filename (no newline) is left as-is.
     """
+    for key in ("photometry", "redshift"):
+        val = inputs.get(key)
+        if isinstance(val, str) and "\n" in val:
+            path = Path(f"{key}.csv")
+            path.write_text(val)
+            inputs[key] = str(path)
+    return inputs
+
+
+def run_fit(inputs: dict) -> dict:
+    """Fit via fiesta_bridge (lazy import so this module loads without fiesta).
+    Returns a stub when analysis_parameters.dry_run is set."""
     params = inputs.get("analysis_parameters") or {}
-    if params.get("dry_run"):
+    # SkyPortal sends optional params as strings, so "False" must be falsy.
+    dry_run = str(params.get("dry_run", "")).strip().lower() in ("true", "1", "yes", "t")
+    if dry_run:
         return {
             "log_bayes_factor": 1.23,
             "_stub": True,
-            "_source": params.get("source", "Me2017"),
+            "_source": params.get("source", "Bu2025_MLP"),
         }
 
-    # Delegated to nmma.skyportal_osg (lives in the NMMA repo) so plugins don't
-    # re-implement the SkyPortal-payload → argv → NMMA-main bridge.
-    from nmma.skyportal_osg import run_from_skyportal_inputs
+    from fiesta_bridge import run_from_skyportal_inputs  # shipped with this wrapper
 
+    inputs = _materialize_inputs(inputs)
     resource_id = inputs.get("resource_id", "obj")
     return run_from_skyportal_inputs(inputs, resource_id=resource_id)
 
 
 def bundle_for_skyportal(
-    nmma_result: dict,
+    fit_result: dict,
     plot_files: list[Path] | None = None,
     result_file: Path | None = None,
 ) -> dict:
@@ -75,16 +88,18 @@ def bundle_for_skyportal(
             "format": result_file.suffix.lstrip(".") or "bin",
             "data": base64.b64encode(result_file.read_bytes()).decode(),
         }
-    if nmma_result.get("_stub") and "results" not in analysis:
+    if fit_result.get("_stub") and "results" not in analysis:
         analysis["results"] = {
             "format": "json",
-            "data": base64.b64encode(json.dumps(nmma_result).encode()).decode(),
+            "data": base64.b64encode(json.dumps(fit_result).encode()).decode(),
         }
-    return {
-        "status": "success",
-        "message": f"log Bayes factor={nmma_result.get('log_bayes_factor')}",
-        "analysis": analysis,
-    }
+    # Nested samplers give a log Bayes factor; fiesta-native (MCMC) doesn't, so
+    # fall back to the fit's own message.
+    if fit_result.get("log_bayes_factor") is not None:
+        message = f"log Bayes factor={fit_result['log_bayes_factor']}"
+    else:
+        message = fit_result.get("message", "fit complete")
+    return {"status": "success", "message": message, "analysis": analysis}
 
 
 def _bearer() -> str | None:
@@ -100,6 +115,9 @@ def upload(bundle: dict) -> bool:
     output_url = os.environ.get("OSDF_OUTPUT_URL")
     if not output_url:
         return False
+    if requests is None:
+        print("warning: requests unavailable; skipping OSDF upload", file=sys.stderr)
+        return False
     token = _bearer()
     headers = {"Content-Type": "application/json"}
     if token:
@@ -112,11 +130,11 @@ def upload(bundle: dict) -> bool:
 def main() -> int:
     try:
         inputs = load_inputs()
-        result = run_nmma(inputs)
+        result = run_fit(inputs)
         if result.get("status") == "failure":
             bundle = {
                 "status": "failure",
-                "message": result.get("message", "NMMA fit failed"),
+                "message": result.get("message", "fiesta fit failed"),
                 "analysis": {},
             }
         else:
@@ -127,6 +145,10 @@ def main() -> int:
                 Path(result["json_result_file"]) if result.get("json_result_file") else None
             )
             bundle = bundle_for_skyportal(result, plot_files=plot_files, result_file=result_file)
+            # Carry the per-filter model light curve through for the SkyPortal
+            # photometry-plot overlay (median + band per filter, on MJD).
+            if result.get("model_lightcurve"):
+                bundle["analysis"]["model_lightcurve"] = result["model_lightcurve"]
     except Exception as e:  # noqa: BLE001 — every failure becomes a SkyPortal "failure" response
         bundle = {
             "status": "failure",

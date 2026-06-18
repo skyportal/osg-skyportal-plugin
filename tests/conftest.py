@@ -73,40 +73,6 @@ def _install_fake_htcondor():
     sys.modules["htcondor"] = mod
 
 
-def _install_fake_nmma():
-    """Shim ``nmma.skyportal_osg`` if it isn't already importable.
-
-    Lets the wrapper's lazy `from nmma.skyportal_osg import …` succeed even when
-    the real NMMA isn't installed. If real NMMA is available, leaves it alone.
-    """
-    try:
-        import nmma.skyportal_osg  # noqa: F401
-
-        return
-    except ImportError:
-        pass
-
-    pkg = types.ModuleType("nmma")
-    so = types.ModuleType("nmma.skyportal_osg")
-
-    def run_from_skyportal_inputs(payload, *, resource_id="obj"):
-        # Tests that care about behavior monkeypatch this default.
-        return {
-            "status": "success",
-            "message": "fake bridge",
-            "log_bayes_factor": 99.9,
-            "posterior_file": None,
-            "json_result_file": None,
-            "plot_file": None,
-            "outdir": None,
-        }
-
-    so.run_from_skyportal_inputs = run_from_skyportal_inputs
-    pkg.skyportal_osg = so
-    sys.modules["nmma"] = pkg
-    sys.modules["nmma.skyportal_osg"] = so
-
-
 def _install_fake_baselayer():
     """Shim baselayer so `import main` works in tests without skyportal installed."""
     pkg = types.ModuleType("baselayer")
@@ -193,7 +159,6 @@ _TEST_CONFIG = _DottedDict(
 # Install shims BEFORE the test session imports main.
 _install_fake_baselayer()
 _install_fake_htcondor()
-_install_fake_nmma()
 
 
 @pytest.fixture(autouse=True)

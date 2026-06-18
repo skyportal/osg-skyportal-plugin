@@ -7,3 +7,11 @@ __pycache__/
 uv.lock
 logs/
 config.yaml
+
+# local run artifacts (spool logs, wrapper-materialized inputs, local staging)
+job.*.out
+job.*.err
+staging-local/
+staging/
+/photometry.csv
+/redshift.csv
