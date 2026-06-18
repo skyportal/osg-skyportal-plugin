@@ -16,8 +16,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from astropy.time import Time
+# numpy + astropy are imported lazily inside the functions that use them: this
+# module is shipped to (and only runs in) the fiesta image, but the plugin's
+# tests import it in a lightweight env without those deps.
 
 # Defaults, overridable per-call via ``analysis_parameters`` in the payload.
 DEFAULTS = {
@@ -48,7 +49,9 @@ def _resolve_redshift(payload: dict) -> float | None:
 def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str]]:
     """Convert SkyPortal photometry to the `time filter mag magerr` data file
     fiesta's ``load_event_data`` reads. Returns (path, min mjd, distinct filters)."""
+    import numpy as np
     from astropy.table import Table
+    from astropy.time import Time
 
     table = Table.read(payload["photometry"], format="ascii.csv")
     data_path = outdir / "data.dat"
@@ -150,6 +153,8 @@ def _build_fiesta_prior(model, kind, overrides, sample_distance):
 def _fiesta_model_lightcurve(model, posterior, fixed, filters, trigger_time, n_samples=50):
     """Per-filter median + 16/84 apparent-mag curves on an MJD grid, via the
     model's own predict() over posterior samples (for the photometry overlay)."""
+    import numpy as np
+
     keys = [k for k in posterior if k not in ("log_prob", "log_likelihood")]
     n = len(posterior[keys[0]])
     idx = np.linspace(0, n - 1, min(n_samples, n)).astype(int)
@@ -189,6 +194,7 @@ def run_from_skyportal_inputs(
     """Fit a fiesta model with its native JAX sampler (default blackjax-smc).
     Returns {status, message, model_lightcurve, posterior_medians, json_result_file}."""
     import jax
+    import numpy as np
     from fiesta.inference.fiesta import Fiesta
     from fiesta.inference.likelihood import EMLikelihood
     from fiesta.utils import load_event_data
