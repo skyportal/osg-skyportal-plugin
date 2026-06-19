@@ -9,8 +9,8 @@ deps change, not when the adapter changes.
 
 Two distribution paths, both stamped onto jobs as `+SingularityImage`:
 - **OSDF** (`fiesta.def` → `.sif`) — fast to iterate; per-job pull (~489 MB).
-- **CVMFS** (`Dockerfile` → Harbor → `/cvmfs/...`) — no per-job pull; sync latency
-  on updates. Preferred for the stable release.
+- **CVMFS** (image built in **fiestaEM** → Docker Hub → `/cvmfs/...`) — no per-job
+  pull; matches ~40x more nodes. **Preferred** for the stable release.
 
 ---
 
@@ -55,43 +55,45 @@ cd /tmp && apptainer exec ~/nmma-build/fiesta.sif python3 /path/to/fiesta_wrappe
 
 ---
 
-## CVMFS path (`Dockerfile` → Harbor) — no per-job image pull
+## CVMFS path (PREFERRED) — no per-job pull, ~40x more matchable nodes
 
-CVMFS distributes *unpacked* images under
-`/cvmfs/singularity.opensciencegrid.org/`, auto-synced from a registry. You push
-a Docker/OCI image; OSG unpacks it; jobs reference a filesystem path.
+The runtime image now lives in and is owned by **fiestaEM**
+(`fiestaEM/containers/Dockerfile`), not this repo — it's a generic fiesta runtime
+with no plugin code. CVMFS distributes *unpacked* images under
+`/cvmfs/singularity.opensciencegrid.org/`, auto-synced from Docker Hub.
 
-1. **Get a Harbor project.** Log in to `hub.opensciencegrid.org` (OSG Harbor) and
-   create/request a project, e.g. `skyportal-osg`. Projects must be **public** for
-   the CVMFS sync, and enabled for auto-sync (the OSG `cvmfs-singularity-sync`
-   picks up tagged images).
+**Why preferred:** a `.sif` over OSDF makes HTCondor add `SINGULARITY_CAN_USE_SIF`
+to the job requirements — only ~27 of ~1195 OSPool slots advertise that, vs ~1175
+with apptainer. A CVMFS path drops that clause, so the job matches ~40x more nodes
+(verified: a CVMFS job matched in minutes and ran exit 0; the `.sif` equivalent sat
+idle for hours).
 
-2. **Build + push** (from any x86_64 docker host; `buildx` for cross-arch):
+1. **Build + push to Docker Hub** (run in the fiestaEM checkout; repo must be public):
 
    ```bash
-   docker build -t hub.opensciencegrid.org/skyportal-osg/fiesta:v1 -f containers/Dockerfile .
-   docker login hub.opensciencegrid.org
-   docker push hub.opensciencegrid.org/skyportal-osg/fiesta:v1
+   docker buildx build --platform linux/amd64 -f containers/Dockerfile \
+     -t docker.io/michaelwcoughlin/fiesta:latest --push .
    ```
 
-3. **Wait for the sync** (periodic — hours, not instant). The image lands at:
+2. **Register for CVMFS sync:** add `michaelwcoughlin/fiesta:latest` to
+   `docker_images.txt` in `opensciencegrid/cvmfs-singularity-sync` (PR). Pushes to
+   the tag then auto-resync.
+
+3. **Wait for the sync** (periodic — hours for a first image). It lands at:
 
    ```
-   /cvmfs/singularity.opensciencegrid.org/skyportal-osg/fiesta:v1
+   /cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/fiesta:latest
    ```
 
-   Check from the AP: `ls /cvmfs/singularity.opensciencegrid.org/skyportal-osg/`.
+   Check from the AP: `ls /cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/`.
 
 4. **Flip the config** to the CVMFS path (a path, not a URL):
 
    ```yaml
-   singularity_image: /cvmfs/singularity.opensciencegrid.org/skyportal-osg/fiesta:v1
+   singularity_image: /cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/fiesta:latest
    ```
 
 Notes:
-- **Updates** = push a new tag (`fiesta:v2`) + wait for the next sync, then bump
-  the config. Keep OSDF for fast iteration / unreleased builds; the two coexist —
-  point `singularity_image` at whichever.
-- CVMFS fetches only the files a job touches, lazily and cached, so image size is
-  a non-issue once synced.
 - The wrapper + bridge still ship per-job; CVMFS only removes the image transfer.
+- CVMFS fetches only the files a job touches, lazily + cached, so image size is moot.
+- Keep OSDF (`fiesta.def`) as a narrow fallback for fast iteration / unreleased builds.
