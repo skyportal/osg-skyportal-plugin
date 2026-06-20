@@ -83,6 +83,10 @@ def bundle_for_skyportal(
             )
     if plots:
         analysis["plots"] = plots
+    # Model name so SkyPortal labels the overlay by the actual fit (e.g.
+    # Bu2025_MLP), not the generic analysis-service name.
+    if fit_result.get("source"):
+        analysis["model_name"] = fit_result["source"]
     if result_file is not None and result_file.exists():
         analysis["results"] = {
             "format": result_file.suffix.lstrip(".") or "bin",
@@ -127,28 +131,114 @@ def upload(bundle: dict) -> bool:
     return True
 
 
+def _bundle_one(result: dict) -> dict:
+    """Single-model SkyPortal bundle (unchanged single-fit behaviour)."""
+    plot_files = [Path(result["plot_file"])] if result.get("plot_file") else []
+    result_file = Path(result["json_result_file"]) if result.get("json_result_file") else None
+    bundle = bundle_for_skyportal(result, plot_files=plot_files, result_file=result_file)
+    # Carry the per-filter model light curve through for the SkyPortal
+    # photometry-plot overlay (median + band per filter, on MJD).
+    if result.get("model_lightcurve"):
+        bundle["analysis"]["model_lightcurve"] = result["model_lightcurve"]
+    if result.get("posterior_samples"):
+        bundle["analysis"]["posterior_samples"] = result["posterior_samples"]
+    if result.get("n_detections") is not None:
+        bundle["analysis"]["n_detections"] = result["n_detections"]
+    return bundle
+
+
 def main() -> int:
     try:
         inputs = load_inputs()
-        result = run_fit(inputs)
-        if result.get("status") == "failure":
+        params = inputs.get("analysis_parameters") or {}
+        dry_run = str(params.get("dry_run", "")).strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "t",
+        )
+        # Fail the whole request fast (and once) when the photometry has fewer
+        # than 2 finite detections — all upper limits / NaN / negative flux — a
+        # fit needs at least 2 points, and this avoids every model reporting the
+        # same emptiness separately.
+        n_det_pre = None
+        if not dry_run:
+            try:
+                from fiesta_bridge import count_detections
+
+                n_det_pre = count_detections(_materialize_inputs({**inputs}))
+            except Exception:  # noqa: BLE001 — on any read issue, take the normal path
+                n_det_pre = None
+        # Grouped fit: analysis_parameters.sources = [model, ...] (or a comma
+        # string) fits every model in THIS one job and overlays all their curves.
+        # Falls back to the single-model path when only `source` is given.
+        sources = params.get("sources")
+        if isinstance(sources, str):
+            sources = [s.strip() for s in sources.split(",") if s.strip()]
+        if n_det_pre is not None and n_det_pre < 2:
             bundle = {
                 "status": "failure",
-                "message": result.get("message", "fiesta fit failed"),
-                "analysis": {},
+                "message": f"Not enough detections to fit (need at least 2, have {n_det_pre}).",
+                "analysis": {"n_detections": n_det_pre},
             }
+        elif not sources:
+            result = run_fit(inputs)
+            if result.get("status") == "failure":
+                bundle = {
+                    "status": "failure",
+                    "message": result.get("message", "fiesta fit failed"),
+                    "analysis": {},
+                }
+            else:
+                bundle = _bundle_one(result)
         else:
-            plot_files = []
-            if pf := result.get("plot_file"):
-                plot_files.append(Path(pf))
-            result_file = (
-                Path(result["json_result_file"]) if result.get("json_result_file") else None
-            )
-            bundle = bundle_for_skyportal(result, plot_files=plot_files, result_file=result_file)
-            # Carry the per-filter model light curve through for the SkyPortal
-            # photometry-plot overlay (median + band per filter, on MJD).
-            if result.get("model_lightcurve"):
-                bundle["analysis"]["model_lightcurve"] = result["model_lightcurve"]
+            curves: dict = {}
+            medians: dict = {}
+            posteriors: dict = {}
+            errors: dict = {}
+            n_det = None
+            for src in sources:
+                sub = {**inputs, "analysis_parameters": {**params, "source": src}}
+                try:
+                    r = run_fit(sub)
+                    if r.get("status") == "failure":
+                        errors[src] = r.get("message", "fit failed")
+                        continue
+                    if r.get("model_lightcurve"):
+                        curves[src] = r["model_lightcurve"]
+                    if r.get("posterior_medians") is not None:
+                        medians[src] = r["posterior_medians"]
+                    if r.get("posterior_samples"):
+                        posteriors[src] = r["posterior_samples"]
+                    if r.get("n_detections") is not None:
+                        n_det = r["n_detections"]
+                except Exception as e:  # noqa: BLE001 — one model must not sink the rest
+                    errors[src] = str(e)
+            if not curves:
+                bundle = {
+                    "status": "failure",
+                    "message": "; ".join(f"{k}: {v}" for k, v in errors.items()) or "no models fit",
+                    "analysis": {},
+                }
+            else:
+                msg = f"fiesta grouped fit: {len(curves)}/{len(sources)} models" + (
+                    f", {len(errors)} failed" if errors else ""
+                )
+                bundle = {
+                    "status": "success",
+                    "message": msg,
+                    "analysis": {
+                        "model_lightcurves": curves,  # {model: {filter: [[mjd,med,lo,hi]]}}
+                        "posteriors": posteriors,  # {model: {param: [samples]}} for corner plots
+                        "n_detections": n_det,  # detections used (run versioning)
+                        "results": {
+                            "format": "json",
+                            "data": base64.b64encode(
+                                json.dumps({"models": medians, "errors": errors}).encode()
+                            ).decode(),
+                        },
+                    },
+                }
     except Exception as e:  # noqa: BLE001 — every failure becomes a SkyPortal "failure" response
         bundle = {
             "status": "failure",

@@ -12,10 +12,12 @@ Contract reference: skyportal PR #3199 (closed) services/nmma_analysis_service/a
 
 import asyncio
 import base64
+import functools
 import json
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,11 @@ from baselayer.log import make_log
 import osdf
 
 log = make_log("osg")
+
+# Condor submits block ~1-2s each; run them off the event loop in a small pool
+# so a single replica can accept and dispatch many concurrent submits instead of
+# serializing them (which made the app's start request time out under bursts).
+_SUBMIT_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="osg-submit")
 
 
 # JobStatus integer encoding per the HTCondor classads documentation.
@@ -52,6 +59,9 @@ class JobRecord:
     resource_id: str | None
     callback_url: str | None
     callback_method: str = "POST"
+    # proc_id is 0 for single submits; batched (itemdata) submits put several
+    # jobs under one cluster as proc 0..N-1, so every job is keyed (cluster, proc).
+    proc_id: int = 0
     submitted_at: float = field(default_factory=time.time)
     status: str = "idle"
     last_polled_at: float | None = None
@@ -63,8 +73,18 @@ class JobRecord:
     inputs: dict[str, Any] = field(default_factory=dict)
 
 
-# In-memory job table for the spike. Rebuilt from the schedd at startup; see rehydrate_jobs.
-JOBS: dict[int, JobRecord] = {}
+# In-memory job table, keyed (cluster_id, proc_id). Rebuilt from the schedd at
+# startup; see rehydrate_jobs.
+JOBS: dict[tuple[int, int], JobRecord] = {}
+
+
+def _key(rec: "JobRecord") -> tuple[int, int]:
+    return (rec.cluster_id, rec.proc_id)
+
+
+# Pending-submit queue for batch mode: (item, future) tuples drained by the
+# flusher, which coalesces them into one itemdata RPC. Created in amain().
+_BATCH_QUEUE: "asyncio.Queue | None" = None
 
 
 def check_caps(cfg: dict, analysis_name: str, resource_id: str | None) -> str | None:
@@ -260,6 +280,17 @@ def submit_job(
         # non-Linux host otherwise defaults requirements to the local platform.
         "requirements": '(Arch == "X86_64") && (OpSys == "LINUX")',
     }
+    # jaxlib (used by the fiesta surrogate models) is built with AVX, so it
+    # SIGILLs on pre-AVX glideins. Require the CPU advertise AVX: ~99% of OSPool
+    # slots set has_avx (vs 87% at Microarch>=x86_64-v3, which needlessly drops
+    # older AVX-only CPUs jaxlib runs on). Slots not advertising it evaluate
+    # UNDEFINED and are skipped — safe by design. Tunable via
+    # defaults.cpu_requirements (set "" to disable) or per-request.
+    cpu_requirements = params.get(
+        "cpu_requirements", defaults.get("cpu_requirements", "(has_avx == True)")
+    )
+    if cpu_requirements:
+        submit_desc["requirements"] += f" && {cpu_requirements}"
     submit_desc["+MaxRuntime"] = str(
         int(params.get("max_runtime_seconds", defaults["max_runtime_seconds"]))
     )
@@ -281,8 +312,9 @@ def submit_job(
     sub = htcondor.Submit(submit_desc)
     cluster_id = _commit_submit(schedd, sub, spool=needs_spool)
 
-    JOBS[cluster_id] = JobRecord(
+    JOBS[(cluster_id, 0)] = JobRecord(
         cluster_id=cluster_id,
+        proc_id=0,
         analysis_name=analysis_name,
         resource_id=resource_id,
         callback_url=callback_url,
@@ -295,9 +327,173 @@ def submit_job(
     return cluster_id
 
 
+def _submit_signature(cfg: dict, params: dict) -> tuple:
+    """Submit-level knobs that must match for jobs to share one itemdata cluster
+    (resources/requirements live on the cluster ad, not per-proc)."""
+    d = cfg["defaults"]
+    return (
+        str(params.get("request_cpus", d["request_cpus"])),
+        str(params.get("request_memory", d["request_memory"])),
+        str(params.get("request_disk", d["request_disk"])),
+        str(params.get("max_runtime_seconds", d["max_runtime_seconds"])),
+        str(params.get("cpu_requirements", d.get("cpu_requirements", ""))),
+        str(d.get("singularity_image", "")),
+    )
+
+
+def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
+    """Submit a group of wrapper jobs in ONE schedd RPC via itemdata: one cluster,
+    one proc per item, per-proc values supplied as macros. `items` share submit
+    resources (the flusher groups by _submit_signature). Returns [(cluster, proc)].
+    """
+    htcondor = _htcondor()
+    defaults = cfg["defaults"]
+    schedd = get_schedd(cfg)
+    plugin_dir = Path(__file__).parent
+    wrapper_src = (plugin_dir / "fiesta_wrapper.py").resolve()
+    bridge_src = (plugin_dir / "fiesta_bridge.py").resolve()
+    staging_root = Path(cfg.get("staging_dir", "staging")).resolve()
+    osdf_cfg = cfg.get("osdf") or {}
+    out_prefix = osdf_cfg.get("output_prefix")
+
+    # Submit-level knobs from the first item (the group shares them by signature).
+    p0 = (items[0].get("inputs") or {}).get("analysis_parameters", {}) or {}
+    submit_desc: dict[str, str] = {
+        "executable": "/usr/bin/python3",
+        "arguments": "fiesta_wrapper.py",
+        "transfer_executable": "False",
+        "should_transfer_files": "YES",
+        "when_to_transfer_output": "ON_EXIT",
+        "transfer_input_files": f"{wrapper_src},{bridge_src},$(inputs_json)",
+        "output": "job.$(ClusterId).$(ProcId).out",
+        "error": "job.$(ClusterId).$(ProcId).err",
+        "request_cpus": str(p0.get("request_cpus", defaults["request_cpus"])),
+        "request_memory": f"{p0.get('request_memory', defaults['request_memory'])}MB",
+        "request_disk": f"{p0.get('request_disk', defaults['request_disk'])}MB",
+        "+ProjectName": f'"{cfg["htcondor"]["project_name"]}"',
+        "requirements": '(Arch == "X86_64") && (OpSys == "LINUX")',
+        "+MaxRuntime": str(int(p0.get("max_runtime_seconds", defaults["max_runtime_seconds"]))),
+        "+SkyPortalAnalysisName": '"$(sp_name)"',
+        "+SkyPortalCallback": '"$(sp_cb)"',
+        "+SkyPortalCallbackMethod": '"$(sp_cbm)"',
+        "+SkyPortalResourceId": '"$(sp_rid)"',
+        "+SkyPortalOsdfOutput": '"$(sp_osdf)"',
+    }
+    cpu_req = p0.get("cpu_requirements", defaults.get("cpu_requirements", "(has_avx == True)"))
+    if cpu_req:
+        submit_desc["requirements"] += f" && {cpu_req}"
+    if defaults.get("singularity_image"):
+        submit_desc["+SingularityImage"] = f'"{defaults["singularity_image"]}"'
+    env_parts = []
+    if out_prefix:
+        env_parts.append("OSDF_OUTPUT_URL=$(sp_osdf)")
+    if osdf_cfg.get("write_token_path"):
+        env_parts.append(f"BEARER_TOKEN_FILE={osdf_cfg['write_token_path']}")
+    if env_parts:
+        submit_desc["environment"] = '"' + " ".join(env_parts) + '"'
+
+    itemdata: list[dict] = []
+    meta: list[tuple] = []
+    for it in items:
+        cluster_uuid = uuid.uuid4().hex
+        job_dir = staging_root / cluster_uuid
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "inputs.json").write_text(json.dumps(it.get("inputs") or {}))
+        osdf_url = (out_prefix.rstrip("/") + f"/{cluster_uuid}.json") if out_prefix else ""
+        itemdata.append(
+            {
+                "inputs_json": str(job_dir / "inputs.json"),
+                "sp_name": it["analysis_name"],
+                "sp_cb": it.get("callback_url") or "",
+                "sp_cbm": it.get("callback_method") or "POST",
+                "sp_rid": it.get("resource_id") or "",
+                "sp_osdf": osdf_url,
+            }
+        )
+        meta.append(
+            (
+                it["analysis_name"],
+                it.get("resource_id"),
+                it.get("callback_url"),
+                it.get("callback_method") or "POST",
+                osdf_url or None,
+                it.get("inputs") or {},
+            )
+        )
+
+    needs_spool = bool(cfg["htcondor"].get("spool", True))
+    sub = htcondor.Submit(submit_desc)
+    # Default count=1 -> one job per itemdata row.
+    result = schedd.submit(sub, itemdata=iter(itemdata), spool=needs_spool)
+    cluster = int(result.cluster())
+    if needs_spool:
+        schedd.spool(result)
+
+    keys: list[tuple[int, int]] = []
+    for proc, (aname, rid, cb, cbm, osdf_url, inp) in enumerate(meta):
+        JOBS[(cluster, proc)] = JobRecord(
+            cluster_id=cluster,
+            proc_id=proc,
+            analysis_name=aname,
+            resource_id=rid,
+            callback_url=cb,
+            callback_method=cbm,
+            osdf_output_url=osdf_url,
+            spooled=needs_spool,
+            inputs=inp,
+        )
+        keys.append((cluster, proc))
+    log(f"batch-submitted cluster_id={cluster} jobs={len(items)}")
+    return keys
+
+
+async def batch_flusher(cfg: dict) -> None:
+    """Drain the submit queue, coalescing requests into itemdata batches. Waits up
+    to window_seconds (or max_size) to gather a batch, groups by submit signature,
+    and resolves each request's future with its (cluster, proc)."""
+    bcfg = cfg.get("batch") or {}
+    max_size = int(bcfg.get("max_size", 50))
+    window = float(bcfg.get("window_seconds", 1.0))
+    loop = asyncio.get_running_loop()
+    assert _BATCH_QUEUE is not None
+    while True:
+        batch = [await _BATCH_QUEUE.get()]  # block for the first
+        deadline = loop.time() + window
+        while len(batch) < max_size:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                batch.append(await asyncio.wait_for(_BATCH_QUEUE.get(), remaining))
+            except asyncio.TimeoutError:
+                break
+        groups: dict[tuple, list] = {}
+        for item, fut in batch:
+            sig = _submit_signature(
+                cfg, (item.get("inputs") or {}).get("analysis_parameters", {}) or {}
+            )
+            groups.setdefault(sig, []).append((item, fut))
+        for group in groups.values():
+            items = [it for it, _f in group]
+            futs = [f for _it, f in group]
+            try:
+                keys = await loop.run_in_executor(
+                    _SUBMIT_POOL, functools.partial(submit_jobs_batch, cfg, items)
+                )
+                for key, fut in zip(keys, futs):
+                    if not fut.done():
+                        fut.set_result(key)
+            except Exception as e:  # noqa: BLE001 — fail this group's requests, keep the loop alive
+                log(f"batch submit failed ({len(items)} jobs): {e!r}")
+                for fut in futs:
+                    if not fut.done():
+                        fut.set_exception(e)
+
+
 # Custom ClassAds we stamp onto every submitted job so the schedd is our truth.
 _SP_AD_PROJECTION = [
     "ClusterId",
+    "ProcId",
     "JobStatus",
     "HoldReason",
     "QDate",
@@ -313,10 +509,12 @@ _SP_AD_PROJECTION = [
 def _adopt_ad(ad: dict, from_history: bool = False) -> None:
     """Reconstruct a JobRecord from one schedd/history ClassAd, if we don't already have it."""
     cid = int(ad["ClusterId"])
-    if cid in JOBS:
+    pid = int(ad.get("ProcId", 0))
+    if (cid, pid) in JOBS:
         return
     rec = JobRecord(
         cluster_id=cid,
+        proc_id=pid,
         analysis_name=ad.get("SkyPortalAnalysisName") or "unknown",
         resource_id=ad.get("SkyPortalResourceId") or None,
         callback_url=ad.get("SkyPortalCallback") or None,
@@ -330,7 +528,7 @@ def _adopt_ad(ad: dict, from_history: bool = False) -> None:
     else:
         rec.status = CONDOR_STATUS.get(int(ad["JobStatus"]), "idle")
         rec.hold_reason = ad.get("HoldReason")
-    JOBS[cid] = rec
+    JOBS[_key(rec)] = rec
 
 
 def rehydrate_jobs(cfg: dict, history_hours: float = 24.0) -> int:
@@ -362,15 +560,15 @@ def _retrieve_outputs(schedd, rec: JobRecord) -> None:
     if not rec.spooled or not hasattr(schedd, "retrieve"):
         return
     try:
-        schedd.retrieve(f"ClusterId == {rec.cluster_id}")
+        schedd.retrieve(f"ClusterId == {rec.cluster_id} && ProcId == {rec.proc_id}")
     except Exception as e:  # noqa: BLE001 — fall back to whatever's on disk
-        log(f"retrieve failed for cluster_id={rec.cluster_id}: {e!r}")
+        log(f"retrieve failed for {rec.cluster_id}.{rec.proc_id}: {e!r}")
 
 
 def collect_outputs(rec: JobRecord) -> dict[str, Any]:
     """Stdout/stderr fallback when no OSDF bundle exists."""
-    stdout_path = Path(f"job.{rec.cluster_id}.0.out")
-    stderr_path = Path(f"job.{rec.cluster_id}.0.err")
+    stdout_path = Path(f"job.{rec.cluster_id}.{rec.proc_id}.out")
+    stderr_path = Path(f"job.{rec.cluster_id}.{rec.proc_id}.err")
     payload: dict[str, Any] = {}
     if stdout_path.exists():
         payload["results"] = {
@@ -390,7 +588,7 @@ def fetch_osdf_bundle(rec: JobRecord, cfg: dict) -> dict | None:
         "scitoken_path"
     )
     try:
-        local = Path(f"logs/bundle.{rec.cluster_id}.json")
+        local = Path(f"logs/bundle.{rec.cluster_id}.{rec.proc_id}.json")
         osdf.download(rec.osdf_output_url, local, token_path=token_path)
         return json.loads(local.read_text())
     except Exception as e:  # noqa: BLE001 — fall back to stdout if OSDF unreachable
@@ -400,7 +598,7 @@ def fetch_osdf_bundle(rec: JobRecord, cfg: dict) -> dict | None:
 
 def _read_stdout_bundle(rec: JobRecord) -> dict | None:
     """Parse the wrapper's SkyPortal bundle from its stdout (printed as the last JSON line)."""
-    stdout_path = Path(f"job.{rec.cluster_id}.0.out")
+    stdout_path = Path(f"job.{rec.cluster_id}.{rec.proc_id}.out")
     if not stdout_path.exists():
         return None
     for line in reversed(stdout_path.read_text(errors="replace").splitlines()):
@@ -451,32 +649,38 @@ def poll_once(cfg: dict) -> None:
     if not JOBS:
         return
     schedd = get_schedd(cfg)
-    cluster_ids = sorted(c for c, r in JOBS.items() if r.completed_at is None)
-    if not cluster_ids:
+    open_keys = [k for k, r in JOBS.items() if r.completed_at is None]
+    if not open_keys:
         return
-    constraint = " || ".join(f"ClusterId == {c}" for c in cluster_ids)
+    # Query distinct clusters (a batched submit shares one ClusterId across many
+    # procs), then match each ad back to its (cluster, proc) record.
+    clusters = sorted({c for (c, _p) in open_keys})
+    constraint = " || ".join(f"ClusterId == {c}" for c in clusters)
 
     live_ads = schedd.query(
         constraint=constraint,
-        projection=["ClusterId", "JobStatus", "HoldReason", "HoldReasonCode"],
+        projection=["ClusterId", "ProcId", "JobStatus", "HoldReason", "HoldReasonCode"],
     )
     seen_live = set()
     for ad in live_ads:
-        cid = int(ad["ClusterId"])
-        seen_live.add(cid)
-        rec = JOBS[cid]
+        k = (int(ad["ClusterId"]), int(ad.get("ProcId", 0)))
+        rec = JOBS.get(k)
+        if rec is None:
+            continue
+        seen_live.add(k)
         rec.status = CONDOR_STATUS.get(int(ad["JobStatus"]), "unknown")
         rec.last_polled_at = time.time()
         rec.hold_reason = ad.get("HoldReason")
 
     # Jobs not in the live queue are in history (completed) or vanished (removed).
-    for cid in (c for c in cluster_ids if c not in seen_live):
-        rec = JOBS[cid]
+    for k in (k for k in open_keys if k not in seen_live):
+        c, p = k
+        rec = JOBS[k]
         rec.last_polled_at = time.time()
         history_ads = list(
             schedd.history(
-                constraint=f"ClusterId == {cid}",
-                projection=["ClusterId", "JobStatus", "ExitCode", "CompletionDate"],
+                constraint=f"ClusterId == {c} && ProcId == {p}",
+                projection=["ClusterId", "ProcId", "JobStatus", "ExitCode", "CompletionDate"],
                 match=1,
             )
         )
@@ -488,8 +692,8 @@ def poll_once(cfg: dict) -> None:
             rec.status = "removed"
             rec.completed_at = time.time()
 
-    for cid in cluster_ids:
-        rec = JOBS[cid]
+    for k in open_keys:
+        rec = JOBS[k]
         if rec.status in TERMINAL and not rec.callback_posted:
             if rec.status == "completed":
                 _retrieve_outputs(schedd, rec)
@@ -522,7 +726,7 @@ class AnalysisHandler(tornado.web.RequestHandler):
     def get(self, analysis_name: str):
         self.write({"status": "active", "analysis": analysis_name})
 
-    def post(self, analysis_name: str):
+    async def post(self, analysis_name: str):
         expected = self.cfg.get("auth", {}).get("incoming_bearer_token")
         if not _check_bearer(self, expected):
             self.set_status(401)
@@ -549,14 +753,48 @@ class AnalysisHandler(tornado.web.RequestHandler):
             self.write({"error": "rate-limited", "reason": cap_reason})
             return
 
+        # Batch mode: hand the request to the flusher, which coalesces many into
+        # one itemdata RPC. We await our own future so the response still carries
+        # the assigned (cluster, proc) — it resolves within ~window_seconds.
+        if (self.cfg.get("batch") or {}).get("enabled", False) and _BATCH_QUEUE is not None:
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            await _BATCH_QUEUE.put(
+                (
+                    {
+                        "analysis_name": analysis_name,
+                        "resource_id": data.get("resource_id"),
+                        "callback_url": data["callback_url"],
+                        "callback_method": data["callback_method"],
+                        "inputs": data["inputs"],
+                    },
+                    fut,
+                )
+            )
+            try:
+                cluster_id, proc_id = await asyncio.wait_for(fut, timeout=25)
+            except Exception as e:  # noqa: BLE001 — batch submit failed/slow
+                log(f"batch submit error: {e!r}")
+                self.set_status(500)
+                self.write({"error": str(e)})
+                return
+            self.write({"status": "pending", "cluster_id": cluster_id, "proc_id": proc_id})
+            return
+
         try:
-            cluster_id = submit_job(
-                self.cfg,
-                analysis_name=analysis_name,
-                resource_id=data.get("resource_id"),
-                callback_url=data["callback_url"],
-                callback_method=data["callback_method"],
-                inputs=data["inputs"],
+            # Offload the blocking condor submit to a worker thread so the event
+            # loop stays free to accept other requests (and keep the poller running).
+            cluster_id = await asyncio.get_running_loop().run_in_executor(
+                _SUBMIT_POOL,
+                functools.partial(
+                    submit_job,
+                    self.cfg,
+                    analysis_name=analysis_name,
+                    resource_id=data.get("resource_id"),
+                    callback_url=data["callback_url"],
+                    callback_method=data["callback_method"],
+                    inputs=data["inputs"],
+                ),
             )
         except Exception as e:  # noqa: BLE001 — surface schedd errors to caller
             log(f"submit error: {e!r}")
@@ -569,12 +807,13 @@ class AnalysisHandler(tornado.web.RequestHandler):
 
 class StatusHandler(tornado.web.RequestHandler):
     def get(self, cluster_id: str):
-        rec = JOBS.get(int(cluster_id))
-        if rec is None:
+        # A cluster may hold several procs (batched submit); return them all.
+        recs = [r for (c, _p), r in JOBS.items() if c == int(cluster_id)]
+        if not recs:
             self.set_status(404)
             self.write({"error": f"unknown cluster_id {cluster_id}"})
             return
-        self.write(asdict(rec))
+        self.write({"jobs": [asdict(r) for r in recs]})
 
 
 class ListHandler(tornado.web.RequestHandler):
@@ -611,6 +850,15 @@ async def amain():
     app.listen(int(cfg["listener"]["port"]), address=cfg["listener"]["host"])
     log(f"listening on {cfg['listener']['host']}:{cfg['listener']['port']}")
     asyncio.create_task(poller_loop(cfg))
+    if (cfg.get("batch") or {}).get("enabled", False):
+        global _BATCH_QUEUE
+        _BATCH_QUEUE = asyncio.Queue()
+        asyncio.create_task(batch_flusher(cfg))
+        bcfg = cfg.get("batch") or {}
+        log(
+            f"batch submit enabled (max_size={bcfg.get('max_size', 50)}, "
+            f"window={bcfg.get('window_seconds', 1.0)}s)"
+        )
     await asyncio.Event().wait()
 
 

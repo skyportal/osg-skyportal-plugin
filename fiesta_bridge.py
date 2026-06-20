@@ -43,12 +43,21 @@ def _resolve_redshift(payload: dict) -> float | None:
     table = Table.read(src, format="ascii.csv")
     if len(table) == 0 or "redshift" not in table.colnames:
         return None
-    return float(table["redshift"][0])
+    # A missing/masked redshift comes through as a masked element, and float() of
+    # it is NaN. Return None (not NaN) so callers fall back to a z=0 / fixed-distance
+    # fit — otherwise NaN propagates into the observer-frame mjd and the
+    # model_lightcurve comes back empty.
+    try:
+        value = float(table["redshift"][0])
+    except (TypeError, ValueError):
+        return None
+    return None if value != value else value  # value != value is True only for NaN
 
 
-def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str]]:
+def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str], int]:
     """Convert SkyPortal photometry to the `time filter mag magerr` data file
-    fiesta's ``load_event_data`` reads. Returns (path, min mjd, distinct filters)."""
+    fiesta's ``load_event_data`` reads. Returns
+    (path, min mjd, distinct filters, n_detections)."""
     import numpy as np
     from astropy.table import Table
     from astropy.time import Time
@@ -57,11 +66,12 @@ def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str
     data_path = outdir / "data.dat"
     filters: list[str] = []
     mjds: list[float] = []
+    n_det = 0
     with data_path.open("w") as fh:
         for row in table:
             mag, magerr = row["mag"], row["magerr"]
-            # SkyPortal sends non-detections (null mag/magerr); fiesta wants
-            # finite detections, so skip them.
+            # SkyPortal sends non-detections (null mag/magerr — e.g. NaN/negative
+            # flux) with a masked mag; fiesta wants finite detections, so skip them.
             if np.ma.is_masked(mag) or np.ma.is_masked(magerr):
                 continue
             try:
@@ -77,7 +87,18 @@ def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str
             if filt not in filters:
                 filters.append(filt)
             fh.write(f"{iso} {filt} {magf} {errf}\n")
-    return data_path, (min(mjds) if mjds else 0.0), filters
+            n_det += 1
+    return data_path, (min(mjds) if mjds else 0.0), filters, n_det
+
+
+def count_detections(payload: dict) -> int:
+    """Number of finite detections fiesta would actually fit from a SkyPortal
+    payload — lets callers fail a request fast (and once) when there are none."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="fiesta_det_") as d:
+        _, _, _, n_det = _write_data_file(payload, Path(d))
+    return n_det
 
 
 def _default_param_range(name: str) -> tuple[float, float]:
@@ -206,19 +227,36 @@ def run_from_skyportal_inputs(
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    data_path, t0, _ = _write_data_file(payload, outdir)
+    data_path, t0, _, n_det = _write_data_file(payload, outdir)
+    # A fit needs at least 2 finite detections (all upper limits / NaN /
+    # negative flux don't count): fail immediately with a clear message rather
+    # than letting each model error out on too-little data.
+    if n_det < 2:
+        return {
+            "status": "failure",
+            "message": f"Not enough detections to fit (need at least 2, have {n_det}).",
+            "source": source,
+            "n_detections": n_det,
+        }
     data = load_event_data(str(data_path))
     filters = list(data.keys())
     model, kind = _build_fiesta_model(source, params.get("em_transient_class"), filters)
 
     redshift = _resolve_redshift(payload)
+    have_z = redshift is not None and redshift > 0
+    # With no measured redshift we can't fix the distance, so SAMPLE over it: the
+    # prior then includes luminosity_distance (1-1000 Mpc) as a free parameter and
+    # model.predict() scales each posterior draw by the sampled distance. An explicit
+    # analysis_parameters['sample_distance'] still wins. Redshift is fixed to 0 in
+    # this case (z=0 observer frame for the mjd grid); the distance carries the fit.
+    sample_distance = bool(params.get("sample_distance", not have_z))
     fixed: dict[str, float] = {
-        "redshift": float(redshift if redshift is not None else params.get("redshift", 0.0))
+        "redshift": float(redshift) if have_z else float(params.get("redshift", 0.0))
     }
-    # Physics models need a distance (phenomenological use amp_mag directly).
-    sample_distance = bool(params.get("sample_distance", False))
+    # Physics models need a distance (phenomenological use amp_mag directly). When
+    # sampling distance we leave luminosity_distance out of `fixed` so it stays free.
     if not sample_distance:
-        if redshift and redshift > 0:
+        if have_z:
             from astropy.cosmology import Planck18 as cosmo
 
             fixed["luminosity_distance"] = float(cosmo.luminosity_distance(redshift).value)
@@ -265,10 +303,16 @@ def run_from_skyportal_inputs(
     fiesta.sample(jax.random.PRNGKey(int(params.get("seed", seed))))
     posterior = fiesta.posterior_samples
 
+    try:
+        n_detections = int(sum(len(v) for v in data.values()))
+    except Exception:  # noqa: BLE001
+        n_detections = None
     result: dict[str, Any] = {
         "status": "success",
         "message": f"fiesta fit complete (model={source}, sampler={sampler})",
+        "source": source,  # the fitted model name (for SkyPortal's per-model overlay label)
         "sampler": sampler,
+        "n_detections": n_detections,  # detections the fit used (for run versioning)
         "outdir": str(outdir),
     }
     try:
@@ -277,6 +321,19 @@ def run_from_skyportal_inputs(
         )
     except Exception as e:  # noqa: BLE001 — overlay data is best-effort
         result["model_lightcurve_error"] = repr(e)
+    # Thinned posterior samples for SkyPortal's client-side Plotly corner plot
+    # ({param: [values]}). No arviz/netCDF — the frontend renders the scatter
+    # matrix. Capped at 400 draws + rounded to keep the stored blob small (one
+    # joblib file per analysis accumulates on the shared volume).
+    try:
+        pkeys = [k for k in posterior if k not in ("log_prob", "log_likelihood")]
+        n = len(np.asarray(posterior[pkeys[0]]))
+        idx = np.linspace(0, n - 1, min(400, n)).astype(int)
+        result["posterior_samples"] = {
+            k: [round(float(x), 5) for x in np.asarray(posterior[k])[idx]] for k in pkeys
+        }
+    except Exception as e:  # noqa: BLE001 — corner data is best-effort
+        result["posterior_samples_error"] = repr(e)
     try:
         result["posterior_medians"] = {
             k: float(np.median(np.asarray(v)))

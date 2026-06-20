@@ -30,6 +30,10 @@ services:
                     request_memory: 2048  # MB
                     request_disk: 1024    # MB
                     max_runtime_seconds: 3600
+                    # Extra startd requirement: jaxlib needs AVX, so skip the
+                    # ~1% of OSPool slots without it (avoids a SIGILL crash).
+                    # ~99% advertise has_avx. Set "" to disable.
+                    cpu_requirements: "(has_avx == True)"
                     # Lean fiesta-only Apptainer image (containers/fiesta.def),
                     # staged to OSDF. Stamped onto wrapper jobs as +SingularityImage.
                     # e.g. osdf:///ospool/ap41/data/<user>/fiesta-v1.sif
@@ -37,6 +41,14 @@ services:
                 poller:
                     # Seconds between condor_q sweeps. Bursty workloads → drop to 10-30.
                     interval_seconds: 60
+                batch:
+                    # Coalesce incoming submits into one itemdata RPC (one cluster,
+                    # many procs) to lift the AP submit-rate ceiling ~10x. The
+                    # flusher waits up to window_seconds (or max_size requests),
+                    # then submits the group. Disabled => one RPC per request.
+                    enabled: false
+                    max_size: 50
+                    window_seconds: 1.0
                 caps:
                     # Reject submissions above these caps with HTTP 429.
                     # null = no limit. Defaults are conservative; raise for production.
