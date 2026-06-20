@@ -52,9 +52,41 @@ class _FakeSubmit:
         return cid
 
 
+class _FakeSubmitResult:
+    """Stand-in for htcondor2's SubmitResult (cluster + proc count)."""
+
+    def __init__(self, cluster_id, num_procs):
+        self._cluster_id = cluster_id
+        self._num_procs = num_procs
+
+    def cluster(self):
+        return self._cluster_id
+
+    def num_procs(self):
+        return self._num_procs
+
+
 class _FakeSchedd:
     def transaction(self):
         return _FakeTxn()
+
+    def submit(self, sub, count=1, spool=False, itemdata=None):
+        # htcondor2 path: one cluster, one proc per itemdata row (or `count`).
+        items = list(itemdata) if itemdata is not None else [None] * count
+        cid = _NEXT_CLUSTER_ID[0]
+        _NEXT_CLUSTER_ID[0] += 1
+        for proc, _item in enumerate(items):
+            ad = {"ClusterId": cid, "ProcId": proc, "JobStatus": 1, "QDate": 1700000000}
+            for k, v in sub.desc.items():
+                if k.startswith("+SkyPortal"):
+                    ad[k[1:]] = _strip_classad_quotes(v)
+                elif k == "+ProjectName":
+                    ad["ProjectName"] = _strip_classad_quotes(v)
+            _FAKE_QUEUE.append(ad)
+        return _FakeSubmitResult(cid, len(items))
+
+    def spool(self, _result):
+        pass
 
     def query(self, constraint=None, projection=None):
         return list(_FAKE_QUEUE)

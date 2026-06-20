@@ -45,10 +45,12 @@ services:
                     # Coalesce incoming submits into one itemdata RPC (one cluster,
                     # many procs) to lift the AP submit-rate ceiling ~10x. The
                     # flusher waits up to window_seconds (or max_size requests),
-                    # then submits the group. Disabled => one RPC per request.
+                    # then submits the group. Requests get an immediate 'pending'
+                    # response (fire-and-forget), so the window can be long without
+                    # blocking callers. Disabled => one RPC per request.
                     enabled: false
                     max_size: 50
-                    window_seconds: 1.0
+                    window_seconds: 30
                 caps:
                     # Reject submissions above these caps with HTTP 429.
                     # null = no limit. Defaults are conservative; raise for production.

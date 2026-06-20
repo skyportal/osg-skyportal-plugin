@@ -447,10 +447,32 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     return keys
 
 
+def _post_failure_callbacks(items: list[dict], message: str) -> None:
+    """POST a failure result to each request's callback_url when a batch submit
+    fails (the requests already got 'pending', so this is how they learn)."""
+    for it in items:
+        url = it.get("callback_url")
+        if not url or (it.get("callback_method") or "POST").upper() != "POST":
+            continue
+        try:
+            requests.post(
+                url,
+                json={
+                    "status": "failure",
+                    "message": f"OSG batch submit failed: {message}",
+                    "analysis": {},
+                },
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            log(f"failure callback to {url} failed: {e!r}")
+
+
 async def batch_flusher(cfg: dict) -> None:
     """Drain the submit queue, coalescing requests into itemdata batches. Waits up
-    to window_seconds (or max_size) to gather a batch, groups by submit signature,
-    and resolves each request's future with its (cluster, proc)."""
+    to window_seconds (or max_size requests) to gather a batch, groups by submit
+    signature, and submits each group in one RPC. Requests already got a 'pending'
+    response, so a submit failure is reported through each one's callback."""
     bcfg = cfg.get("batch") or {}
     max_size = int(bcfg.get("max_size", 50))
     window = float(bcfg.get("window_seconds", 1.0))
@@ -468,26 +490,21 @@ async def batch_flusher(cfg: dict) -> None:
             except asyncio.TimeoutError:
                 break
         groups: dict[tuple, list] = {}
-        for item, fut in batch:
+        for item in batch:
             sig = _submit_signature(
                 cfg, (item.get("inputs") or {}).get("analysis_parameters", {}) or {}
             )
-            groups.setdefault(sig, []).append((item, fut))
-        for group in groups.values():
-            items = [it for it, _f in group]
-            futs = [f for _it, f in group]
+            groups.setdefault(sig, []).append(item)
+        for items in groups.values():
             try:
-                keys = await loop.run_in_executor(
+                await loop.run_in_executor(
                     _SUBMIT_POOL, functools.partial(submit_jobs_batch, cfg, items)
                 )
-                for key, fut in zip(keys, futs):
-                    if not fut.done():
-                        fut.set_result(key)
-            except Exception as e:  # noqa: BLE001 — fail this group's requests, keep the loop alive
+            except Exception as e:  # noqa: BLE001 — keep the loop alive; report via callback
                 log(f"batch submit failed ({len(items)} jobs): {e!r}")
-                for fut in futs:
-                    if not fut.done():
-                        fut.set_exception(e)
+                await loop.run_in_executor(
+                    _SUBMIT_POOL, functools.partial(_post_failure_callbacks, items, str(e))
+                )
 
 
 # Custom ClassAds we stamp onto every submitted job so the schedd is our truth.
@@ -753,32 +770,22 @@ class AnalysisHandler(tornado.web.RequestHandler):
             self.write({"error": "rate-limited", "reason": cap_reason})
             return
 
-        # Batch mode: hand the request to the flusher, which coalesces many into
-        # one itemdata RPC. We await our own future so the response still carries
-        # the assigned (cluster, proc) — it resolves within ~window_seconds.
+        # Batch mode: hand the request to the flusher and respond immediately
+        # (fire-and-forget). The flusher coalesces requests over window_seconds
+        # into one itemdata RPC; the job's result — success or submit failure —
+        # comes back via the callback. Responding now means the request never
+        # blocks on the (possibly long) batch window or a slow submit.
         if (self.cfg.get("batch") or {}).get("enabled", False) and _BATCH_QUEUE is not None:
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
             await _BATCH_QUEUE.put(
-                (
-                    {
-                        "analysis_name": analysis_name,
-                        "resource_id": data.get("resource_id"),
-                        "callback_url": data["callback_url"],
-                        "callback_method": data["callback_method"],
-                        "inputs": data["inputs"],
-                    },
-                    fut,
-                )
+                {
+                    "analysis_name": analysis_name,
+                    "resource_id": data.get("resource_id"),
+                    "callback_url": data["callback_url"],
+                    "callback_method": data["callback_method"],
+                    "inputs": data["inputs"],
+                }
             )
-            try:
-                cluster_id, proc_id = await asyncio.wait_for(fut, timeout=25)
-            except Exception as e:  # noqa: BLE001 — batch submit failed/slow
-                log(f"batch submit error: {e!r}")
-                self.set_status(500)
-                self.write({"error": str(e)})
-                return
-            self.write({"status": "pending", "cluster_id": cluster_id, "proc_id": proc_id})
+            self.write({"status": "pending", "queued": True})
             return
 
         try:

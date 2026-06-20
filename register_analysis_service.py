@@ -8,7 +8,7 @@ from `services.external.osg.params.skyportal`.
 Usage:
     uv run python register_analysis_service.py \\
         --name NMMA_OSG --display "NMMA on OSG" \\
-        --listener-url http://my-host:7100/analysis/nmma_osg \\
+        --listener-url http://my-host:7100/analysis/fiesta_osg \\
         --group-ids 1 2
 """
 
@@ -26,7 +26,7 @@ def parse_args():
     p.add_argument(
         "--listener-url",
         required=True,
-        help="Plugin URL SkyPortal should POST to, e.g. http://host:7100/analysis/nmma_osg",
+        help="Plugin URL SkyPortal should POST to, e.g. http://host:7100/analysis/fiesta_osg",
     )
     p.add_argument(
         "--analysis-type",

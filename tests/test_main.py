@@ -12,15 +12,15 @@ import main
 def test_submit_job_round_trips_into_jobs(plugin_cfg, fake_queue):
     cid = main.submit_job(
         plugin_cfg,
-        analysis_name="nmma_osg",
+        analysis_name="fiesta_osg",
         resource_id="ZTF20abc",
         callback_url="http://callback/x",
         callback_method="POST",
         inputs={"analysis_parameters": {"arguments": "5"}},
     )
-    assert cid in main.JOBS
-    rec = main.JOBS[cid]
-    assert rec.analysis_name == "nmma_osg"
+    assert (cid, 0) in main.JOBS
+    rec = main.JOBS[(cid, 0)]
+    assert rec.analysis_name == "fiesta_osg"
     assert rec.resource_id == "ZTF20abc"
     assert rec.callback_url == "http://callback/x"
     assert any(ad["ClusterId"] == cid for ad in fake_queue)
@@ -40,7 +40,7 @@ def test_poll_marks_completed_via_history(plugin_cfg, fake_queue, fake_history):
     fake_history.append({"ClusterId": cid, "JobStatus": 4, "CompletionDate": 1700000000})
 
     main.poll_once(plugin_cfg)
-    rec = main.JOBS[cid]
+    rec = main.JOBS[(cid, 0)]
     assert rec.status == "completed"
     assert rec.completed_at == 1700000000
 
@@ -70,7 +70,7 @@ def test_poll_posts_callback_with_skyportal_shape(
         assert body["status"] == "success"
         # The analysis result is base64'd stdout per the SkyPortal contract.
         assert body["analysis"]["results"]["format"] == "text"
-    assert main.JOBS[cid].callback_posted is True
+    assert main.JOBS[(cid, 0)].callback_posted is True
 
 
 def test_poll_marks_held_job_failure_in_callback(plugin_cfg, fake_queue, monkeypatch, tmp_path):
@@ -89,7 +89,7 @@ def test_poll_marks_held_job_failure_in_callback(plugin_cfg, fake_queue, monkeyp
         {"ClusterId": cid, "JobStatus": 5, "HoldReason": "scitoken expired", "HoldReasonCode": 26}
     )
     main.poll_once(plugin_cfg)
-    rec = main.JOBS[cid]
+    rec = main.JOBS[(cid, 0)]
     assert rec.status == "held"
     assert rec.hold_reason == "scitoken expired"
     # Held isn't terminal — callback shouldn't fire yet.
@@ -136,14 +136,14 @@ _CONFIG_FOR_HTTP = {
 
 class TestAnalysisEndpoint(_AppTestCase):
     def test_get_returns_status_active(self):
-        r = self.fetch("/analysis/nmma_osg")
+        r = self.fetch("/analysis/fiesta_osg")
         assert r.code == 200
         body = json.loads(r.body)
-        assert body == {"status": "active", "analysis": "nmma_osg"}
+        assert body == {"status": "active", "analysis": "fiesta_osg"}
 
     def test_post_requires_bearer(self):
         r = self.fetch(
-            "/analysis/nmma_osg",
+            "/analysis/fiesta_osg",
             method="POST",
             body=json.dumps({"inputs": {}, "callback_url": "x", "callback_method": "POST"}),
             headers={},
@@ -152,7 +152,7 @@ class TestAnalysisEndpoint(_AppTestCase):
 
     def test_post_rejects_invalid_json(self):
         r = self.fetch(
-            "/analysis/nmma_osg",
+            "/analysis/fiesta_osg",
             method="POST",
             body=b"not-json",
             headers={"Authorization": "Bearer secret-test-token"},
@@ -161,7 +161,7 @@ class TestAnalysisEndpoint(_AppTestCase):
 
     def test_post_requires_keys(self):
         r = self.fetch(
-            "/analysis/nmma_osg",
+            "/analysis/fiesta_osg",
             method="POST",
             body=json.dumps({"inputs": {}}),
             headers={"Authorization": "Bearer secret-test-token"},
@@ -171,7 +171,7 @@ class TestAnalysisEndpoint(_AppTestCase):
 
     def test_post_happy_path_returns_cluster_id(self):
         r = self.fetch(
-            "/analysis/nmma_osg",
+            "/analysis/fiesta_osg",
             method="POST",
             body=json.dumps(
                 {
@@ -187,7 +187,7 @@ class TestAnalysisEndpoint(_AppTestCase):
         body = json.loads(r.body)
         assert body["status"] == "pending"
         assert isinstance(body["cluster_id"], int)
-        assert body["cluster_id"] in main.JOBS
+        assert (body["cluster_id"], 0) in main.JOBS
 
 
 class TestJobsEndpoint(_AppTestCase):
@@ -207,13 +207,13 @@ class TestJobsEndpoint(_AppTestCase):
 def test_submit_stamps_skyportal_classads(plugin_cfg, last_submit_desc):
     main.submit_job(
         plugin_cfg,
-        analysis_name="nmma_osg",
+        analysis_name="fiesta_osg",
         resource_id="ZTF20abc",
         callback_url="http://sp/api/obj/ZTF20abc/analysis/42",
         callback_method="POST",
         inputs={},
     )
-    assert last_submit_desc["+SkyPortalAnalysisName"] == '"nmma_osg"'
+    assert last_submit_desc["+SkyPortalAnalysisName"] == '"fiesta_osg"'
     assert last_submit_desc["+SkyPortalCallback"] == '"http://sp/api/obj/ZTF20abc/analysis/42"'
     assert last_submit_desc["+SkyPortalCallbackMethod"] == '"POST"'
     assert last_submit_desc["+SkyPortalResourceId"] == '"ZTF20abc"'
@@ -227,7 +227,7 @@ def test_rehydrate_picks_up_jobs_from_schedd(plugin_cfg, fake_queue):
             "JobStatus": 2,  # running
             "QDate": 1700000000,
             "ProjectName": "Test",
-            "SkyPortalAnalysisName": "nmma_osg",
+            "SkyPortalAnalysisName": "fiesta_osg",
             "SkyPortalCallback": "http://sp/api/obj/X/analysis/7",
             "SkyPortalCallbackMethod": "POST",
             "SkyPortalResourceId": "ZTF99",
@@ -236,9 +236,9 @@ def test_rehydrate_picks_up_jobs_from_schedd(plugin_cfg, fake_queue):
     assert main.JOBS == {}
     n = main.rehydrate_jobs(plugin_cfg)
     assert n == 1
-    rec = main.JOBS[42]
+    rec = main.JOBS[(42, 0)]
     assert rec.status == "running"
-    assert rec.analysis_name == "nmma_osg"
+    assert rec.analysis_name == "fiesta_osg"
     assert rec.callback_url == "http://sp/api/obj/X/analysis/7"
     assert rec.resource_id == "ZTF99"
 
@@ -264,13 +264,13 @@ def test_check_caps_blocks_per_analysis(plugin_cfg):
     plugin_cfg["caps"] = {"max_concurrent_per_analysis": 1}
     main.submit_job(
         plugin_cfg,
-        analysis_name="nmma_osg",
+        analysis_name="fiesta_osg",
         resource_id="A",
         callback_url=None,
         callback_method="POST",
         inputs={},
     )
-    assert main.check_caps(plugin_cfg, "nmma_osg", "B") is not None
+    assert main.check_caps(plugin_cfg, "fiesta_osg", "B") is not None
     assert main.check_caps(plugin_cfg, "different", "B") is None
 
 
@@ -278,14 +278,14 @@ def test_check_caps_blocks_per_resource(plugin_cfg):
     plugin_cfg["caps"] = {"max_concurrent_per_resource_per_analysis": 1}
     main.submit_job(
         plugin_cfg,
-        analysis_name="nmma_osg",
+        analysis_name="fiesta_osg",
         resource_id="ZTF1",
         callback_url=None,
         callback_method="POST",
         inputs={},
     )
-    assert main.check_caps(plugin_cfg, "nmma_osg", "ZTF1") is not None
-    assert main.check_caps(plugin_cfg, "nmma_osg", "ZTF2") is None
+    assert main.check_caps(plugin_cfg, "fiesta_osg", "ZTF1") is not None
+    assert main.check_caps(plugin_cfg, "fiesta_osg", "ZTF2") is None
 
 
 def test_check_caps_ignores_completed_jobs(plugin_cfg):
@@ -298,7 +298,7 @@ def test_check_caps_ignores_completed_jobs(plugin_cfg):
         callback_method="POST",
         inputs={},
     )
-    main.JOBS[cid].completed_at = 1.0  # mark terminal
+    main.JOBS[(cid, 0)].completed_at = 1.0  # mark terminal
     assert main.check_caps(plugin_cfg, "x", "B") is None
 
 
@@ -318,9 +318,9 @@ class TestCapHttp(_AppTestCase):
             }
         )
         headers = {"Authorization": "Bearer secret-test-token"}
-        r1 = self.fetch("/analysis/nmma_osg", method="POST", body=body, headers=headers)
+        r1 = self.fetch("/analysis/fiesta_osg", method="POST", body=body, headers=headers)
         assert r1.code == 200
-        r2 = self.fetch("/analysis/nmma_osg", method="POST", body=body, headers=headers)
+        r2 = self.fetch("/analysis/fiesta_osg", method="POST", body=body, headers=headers)
         assert r2.code == 429
         assert r2.headers.get("Retry-After") == "60"
 
@@ -334,13 +334,13 @@ def test_submit_with_wrapper_stages_inputs_and_records_osdf_url(plugin_cfg, tmp_
     plugin_cfg["staging_dir"] = str(tmp_path / "stg")
     cid = main.submit_job(
         plugin_cfg,
-        analysis_name="nmma_osg",
+        analysis_name="fiesta_osg",
         resource_id="ZTF1",
         callback_url="http://cb",
         callback_method="POST",
         inputs={"analysis_parameters": {"use_wrapper": True, "dry_run": True}},
     )
-    rec = main.JOBS[cid]
+    rec = main.JOBS[(cid, 0)]
     assert rec.osdf_output_url
     assert rec.osdf_output_url.startswith("https://origin/jobs/")
     # inputs.json was staged
@@ -358,7 +358,7 @@ def test_build_callback_body_prefers_osdf_bundle(plugin_cfg, monkeypatch):
         callback_method="POST",
         inputs={},
     )
-    rec = main.JOBS[cid]
+    rec = main.JOBS[(cid, 0)]
     rec.osdf_output_url = "https://origin/jobs/abc.json"
     rec.status = "completed"
 
@@ -383,7 +383,7 @@ def test_build_callback_body_falls_back_when_no_osdf(plugin_cfg, tmp_path, monke
         inputs={},
     )
     (tmp_path / f"job.{cid}.0.out").write_bytes(b"hi")
-    rec = main.JOBS[cid]
+    rec = main.JOBS[(cid, 0)]
     rec.status = "completed"
     body = main.build_callback_body(rec, plugin_cfg)
     assert body["status"] == "success"
@@ -403,7 +403,7 @@ def test_build_callback_body_parses_wrapper_bundle_from_stdout(plugin_cfg, tmp_p
     # Wrapper prints its SkyPortal bundle as the last stdout line (no OSDF).
     wrapper_bundle = {"status": "success", "message": "lnZ=1.23", "analysis": {"results": {"x": 1}}}
     (tmp_path / f"job.{cid}.0.out").write_text("NMMA chatter...\n" + json.dumps(wrapper_bundle))
-    rec = main.JOBS[cid]
+    rec = main.JOBS[(cid, 0)]
     rec.status = "completed"
     assert main.build_callback_body(rec, plugin_cfg) == wrapper_bundle
 
@@ -417,8 +417,11 @@ def test_submit_desc_is_remote_safe(plugin_cfg, last_submit_desc):
         callback_method="POST",
         inputs={},
     )
-    # Target OSPool Linux/x86_64; don't ship the local executable.
-    assert last_submit_desc["requirements"] == '(Arch == "X86_64") && (OpSys == "LINUX")'
+    # Target OSPool Linux/x86_64 (+ AVX for jaxlib); don't ship the local executable.
+    assert (
+        last_submit_desc["requirements"]
+        == '(Arch == "X86_64") && (OpSys == "LINUX") && (has_avx == True)'
+    )
     assert last_submit_desc["transfer_executable"] == "False"
     # The schedd event log violates OSPool's home-dir policy for remote submit.
     assert "log" not in last_submit_desc
@@ -438,7 +441,7 @@ def test_spool_defaults_on_and_is_configurable(plugin_cfg):
         callback_method="POST",
         inputs={},
     )
-    assert main.JOBS[cid].spooled is True  # htcondor.spool defaults true
+    assert main.JOBS[(cid, 0)].spooled is True  # htcondor.spool defaults true
 
     plugin_cfg["htcondor"]["spool"] = False
     cid2 = main.submit_job(
@@ -449,7 +452,7 @@ def test_spool_defaults_on_and_is_configurable(plugin_cfg):
         callback_method="POST",
         inputs={},
     )
-    assert main.JOBS[cid2].spooled is False
+    assert main.JOBS[(cid2, 0)].spooled is False
 
 
 def test_wrapper_mode_via_config_default(plugin_cfg, last_submit_desc, tmp_path, monkeypatch):
@@ -458,7 +461,7 @@ def test_wrapper_mode_via_config_default(plugin_cfg, last_submit_desc, tmp_path,
     plugin_cfg["staging_dir"] = str(tmp_path / "stg")
     main.submit_job(
         plugin_cfg,
-        analysis_name="nmma_osg",
+        analysis_name="fiesta_osg",
         resource_id="ZTF1",
         callback_url=None,
         callback_method="POST",
@@ -509,6 +512,35 @@ def test_ensure_keepalive_submits_held_marker_job(plugin_cfg, fake_queue, last_s
         assert len(fake_queue) == 1
     finally:
         plugin_cfg["htcondor"].pop("keepalive", None)
+
+
+def test_submit_jobs_batch_one_cluster_many_procs(plugin_cfg, tmp_path, last_submit_desc):
+    """A batch submits as one cluster with one proc per request, and each proc's
+    JobRecord keeps its own request's callback/resource (no crossed wires)."""
+    plugin_cfg["staging_dir"] = str(tmp_path / "staging")
+    items = [
+        {
+            "analysis_name": "fiesta_osg",
+            "resource_id": f"OBJ{i}",
+            "callback_url": f"http://cb/{i}",
+            "callback_method": "POST",
+            "inputs": {"analysis_parameters": {}},
+        }
+        for i in range(3)
+    ]
+    keys = main.submit_jobs_batch(plugin_cfg, items)
+
+    assert len(keys) == 3
+    assert len({c for c, _p in keys}) == 1  # all under one cluster
+    assert sorted(p for _c, p in keys) == [0, 1, 2]  # procs 0..2
+    for c, p in keys:
+        rec = main.JOBS[(c, p)]
+        assert rec.proc_id == p
+        assert rec.resource_id == f"OBJ{p}"
+        assert rec.callback_url == f"http://cb/{p}"
+    # The submit carries per-proc macros + the AVX requirement.
+    assert last_submit_desc["+SkyPortalResourceId"] == '"$(sp_rid)"'
+    assert "has_avx" in last_submit_desc["requirements"]
 
 
 if __name__ == "__main__":
