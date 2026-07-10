@@ -15,6 +15,7 @@ import base64
 import functools
 import json
 import os
+import signal
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -82,9 +83,13 @@ def _key(rec: "JobRecord") -> tuple[int, int]:
     return (rec.cluster_id, rec.proc_id)
 
 
-# Pending-submit queue for batch mode: (item, future) tuples drained by the
-# flusher, which coalesces them into one itemdata RPC. Created in amain().
+# Pending-submit queue for batch mode: request dicts drained by the flusher,
+# which coalesces them into one itemdata RPC. Created in amain().
 _BATCH_QUEUE: "asyncio.Queue | None" = None
+
+# Set on SIGTERM/SIGINT so the flusher drains the queue before the process exits
+# (a rolling restart otherwise drops buffered fire-and-forget requests).
+_SHUTDOWN: "asyncio.Event | None" = None
 
 
 def check_caps(cfg: dict, analysis_name: str, resource_id: str | None) -> str | None:
@@ -151,13 +156,23 @@ def get_schedd(cfg: dict):
     schedd_name = cfg["htcondor"].get("schedd")
     if collector_host is None:
         return htcondor.Schedd()
-    collector = htcondor.Collector(collector_host)
-    ad = (
-        collector.locate(htcondor.DaemonTypes.Schedd, schedd_name)
-        if schedd_name
-        else collector.locate(htcondor.DaemonTypes.Schedd)
+    # Try each collector in turn. A dead collector makes locate() return None
+    # (it doesn't raise), and htcondor.Schedd(None) silently targets the local
+    # daemon -> "Unable to locate local daemon". Fail over instead of trusting a
+    # single collector, and never build a Schedd from a None ad.
+    dt = htcondor.DaemonTypes.Schedd
+    last_err = None
+    for host in (h.strip() for h in collector_host.split(",") if h.strip()):
+        try:
+            collector = htcondor.Collector(host)
+            ad = collector.locate(dt, schedd_name) if schedd_name else collector.locate(dt)
+            if ad is not None:
+                return htcondor.Schedd(ad)
+        except Exception as e:  # noqa: BLE001 — fall through to the next collector
+            last_err = e
+    raise RuntimeError(
+        f"could not locate schedd {schedd_name!r} via collector(s) {collector_host!r}: {last_err}"
     )
-    return htcondor.Schedd(ad)
 
 
 def ensure_keepalive(cfg: dict) -> None:
@@ -468,43 +483,90 @@ def _post_failure_callbacks(items: list[dict], message: str) -> None:
             log(f"failure callback to {url} failed: {e!r}")
 
 
+async def _flush_batch(cfg: dict, loop, batch: list[dict]) -> None:
+    """Group a batch of requests by submit signature and submit each group in one
+    itemdata RPC; report any submit failure through the requests' callbacks."""
+    groups: dict[tuple, list] = {}
+    for item in batch:
+        sig = _submit_signature(
+            cfg, (item.get("inputs") or {}).get("analysis_parameters", {}) or {}
+        )
+        groups.setdefault(sig, []).append(item)
+    for items in groups.values():
+        try:
+            await loop.run_in_executor(
+                _SUBMIT_POOL, functools.partial(submit_jobs_batch, cfg, items)
+            )
+        except Exception as e:  # noqa: BLE001 — keep the loop alive; report via callback
+            log(f"batch submit failed ({len(items)} jobs): {e!r}")
+            await loop.run_in_executor(
+                _SUBMIT_POOL, functools.partial(_post_failure_callbacks, items, str(e))
+            )
+
+
 async def batch_flusher(cfg: dict) -> None:
     """Drain the submit queue, coalescing requests into itemdata batches. Waits up
     to window_seconds (or max_size requests) to gather a batch, groups by submit
     signature, and submits each group in one RPC. Requests already got a 'pending'
-    response, so a submit failure is reported through each one's callback."""
+    response, so a submit failure is reported through each one's callback.
+
+    On shutdown (SIGTERM via `_SHUTDOWN`) it flushes the partial batch + whatever
+    is still queued and exits, so a rolling restart never drops buffered requests.
+    """
     bcfg = cfg.get("batch") or {}
     max_size = int(bcfg.get("max_size", 50))
     window = float(bcfg.get("window_seconds", 1.0))
     loop = asyncio.get_running_loop()
-    assert _BATCH_QUEUE is not None
+    assert _BATCH_QUEUE is not None and _SHUTDOWN is not None
     while True:
-        batch = [await _BATCH_QUEUE.get()]  # block for the first
+        # Wait for the first item, but wake immediately if we're shutting down.
+        if _BATCH_QUEUE.empty():
+            getter = asyncio.ensure_future(_BATCH_QUEUE.get())
+            stopper = asyncio.ensure_future(_SHUTDOWN.wait())
+            done, pending = await asyncio.wait(
+                {getter, stopper}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            if getter in done:
+                batch = [getter.result()]
+            else:
+                break  # shutting down with an empty queue
+        else:
+            batch = [_BATCH_QUEUE.get_nowait()]
+        # Accumulate up to the window / max_size. Race each get against the
+        # shutdown event so SIGTERM cuts the window short immediately (otherwise
+        # we'd block here for the full window and miss the drain deadline).
         deadline = loop.time() + window
-        while len(batch) < max_size:
+        while len(batch) < max_size and not _SHUTDOWN.is_set():
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
-            try:
-                batch.append(await asyncio.wait_for(_BATCH_QUEUE.get(), remaining))
-            except asyncio.TimeoutError:
-                break
-        groups: dict[tuple, list] = {}
-        for item in batch:
-            sig = _submit_signature(
-                cfg, (item.get("inputs") or {}).get("analysis_parameters", {}) or {}
+            getter = asyncio.ensure_future(_BATCH_QUEUE.get())
+            stopper = asyncio.ensure_future(_SHUTDOWN.wait())
+            done, pending = await asyncio.wait(
+                {getter, stopper}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
             )
-            groups.setdefault(sig, []).append(item)
-        for items in groups.values():
-            try:
-                await loop.run_in_executor(
-                    _SUBMIT_POOL, functools.partial(submit_jobs_batch, cfg, items)
-                )
-            except Exception as e:  # noqa: BLE001 — keep the loop alive; report via callback
-                log(f"batch submit failed ({len(items)} jobs): {e!r}")
-                await loop.run_in_executor(
-                    _SUBMIT_POOL, functools.partial(_post_failure_callbacks, items, str(e))
-                )
+            for t in pending:
+                t.cancel()
+            if getter in done:
+                batch.append(getter.result())
+            else:
+                break  # window timeout or shutdown
+        # On shutdown, drain everything else still queued so nothing is lost.
+        if _SHUTDOWN.is_set():
+            while not _BATCH_QUEUE.empty():
+                batch.append(_BATCH_QUEUE.get_nowait())
+        await _flush_batch(cfg, loop, batch)
+        if _SHUTDOWN.is_set():
+            break
+    # Final safety drain: submit anything that raced into the queue at shutdown.
+    leftover = []
+    while not _BATCH_QUEUE.empty():
+        leftover.append(_BATCH_QUEUE.get_nowait())
+    if leftover:
+        await _flush_batch(cfg, loop, leftover)
+    log(f"batch flusher exiting (drained {len(leftover)} leftover)")
 
 
 # Custom ClassAds we stamp onto every submitted job so the schedd is our truth.
@@ -854,18 +916,43 @@ async def amain():
     except Exception as e:  # noqa: BLE001 — keepalive is best-effort, never block startup
         log(f"keepalive setup failed (continuing): {e!r}")
     app = build_app(cfg)
-    app.listen(int(cfg["listener"]["port"]), address=cfg["listener"]["host"])
+    server = app.listen(int(cfg["listener"]["port"]), address=cfg["listener"]["host"])
     log(f"listening on {cfg['listener']['host']}:{cfg['listener']['port']}")
     asyncio.create_task(poller_loop(cfg))
+
+    global _BATCH_QUEUE, _SHUTDOWN
+    _SHUTDOWN = asyncio.Event()
+    flusher_task = None
     if (cfg.get("batch") or {}).get("enabled", False):
-        global _BATCH_QUEUE
         _BATCH_QUEUE = asyncio.Queue()
-        asyncio.create_task(batch_flusher(cfg))
+        flusher_task = asyncio.create_task(batch_flusher(cfg))
         bcfg = cfg.get("batch") or {}
         log(
             f"batch submit enabled (max_size={bcfg.get('max_size', 50)}, "
             f"window={bcfg.get('window_seconds', 1.0)}s)"
         )
+
+    # Graceful shutdown: stop accepting new requests, let the flusher drain the
+    # queue (bounded by the pod's terminationGracePeriod), then exit.
+    loop = asyncio.get_running_loop()
+
+    async def _graceful() -> None:
+        log("shutdown signal received: draining before exit")
+        server.stop()
+        _SHUTDOWN.set()
+        if flusher_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(flusher_task), timeout=25)
+            except Exception as e:  # noqa: BLE001 — drain is best-effort
+                log(f"flusher drain did not finish cleanly: {e!r}")
+        loop.stop()
+
+    for signame in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(signame, lambda: asyncio.create_task(_graceful()))
+        except NotImplementedError:  # pragma: no cover — non-Unix
+            pass
+
     await asyncio.Event().wait()
 
 
