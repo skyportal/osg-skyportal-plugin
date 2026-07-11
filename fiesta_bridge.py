@@ -56,39 +56,85 @@ def _resolve_redshift(payload: dict) -> float | None:
 
 def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str], int]:
     """Convert SkyPortal photometry to the `time filter mag magerr` data file
-    fiesta's ``load_event_data`` reads. Returns
-    (path, min mjd, distinct filters, n_detections)."""
+    fiesta's ``load_event_data`` reads. Detections are written with their error;
+    selected upper limits are written as `mag=limiting_mag err=inf`, which fiesta
+    treats as a censored (truncated-Gaussian) constraint. Returns
+    (path, min detection mjd, distinct filters, n_detections)."""
     import numpy as np
     from astropy.table import Table
     from astropy.time import Time
 
+    # SkyPortal flux zeropoint (µJy AB): mag = -2.5 log10(flux) + ZP. NSIGMA is
+    # the fallback detection threshold used only when limiting_mag isn't exported.
+    PHOT_ZP, NSIGMA = 23.9, 5.0
+
     table = Table.read(payload["photometry"], format="ascii.csv")
-    data_path = outdir / "data.dat"
-    filters: list[str] = []
-    mjds: list[float] = []
-    n_det = 0
-    with data_path.open("w") as fh:
-        for row in table:
-            mag, magerr = row["mag"], row["magerr"]
-            # SkyPortal sends non-detections (null mag/magerr — e.g. NaN/negative
-            # flux) with a masked mag; fiesta wants finite detections, so skip them.
-            if np.ma.is_masked(mag) or np.ma.is_masked(magerr):
-                continue
+    cols = table.colnames
+
+    def _limit_mag(row) -> float | None:
+        """Upper-limit magnitude for a non-detection: prefer SkyPortal's
+        limiting_mag, else derive it from fluxerr. None if neither is usable."""
+        if "limiting_mag" in cols and not np.ma.is_masked(row["limiting_mag"]):
+            v = float(row["limiting_mag"])
+            if np.isfinite(v):
+                return v
+        if "fluxerr" in cols and not np.ma.is_masked(row["fluxerr"]):
+            fe = float(row["fluxerr"])
+            if np.isfinite(fe) and fe > 0:
+                return -2.5 * np.log10(NSIGMA * fe) + PHOT_ZP
+        return None
+
+    # SkyPortal sends non-detections with a masked mag; split them out so we can
+    # keep only the informative upper limits below.
+    dets: list[tuple[float, str, float, float]] = []
+    nondets: list[tuple[float, str, float]] = []
+    for row in table:
+        filt, mjd = str(row["filter"]), float(row["mjd"])
+        mag, magerr = row["mag"], row["magerr"]
+        if not (np.ma.is_masked(mag) or np.ma.is_masked(magerr)):
             try:
                 magf, errf = float(mag), float(magerr)
             except (TypeError, ValueError):
+                magf = errf = float("nan")
+            if np.isfinite(magf) and np.isfinite(errf):
+                dets.append((mjd, filt, magf, errf))
                 continue
-            if not (np.isfinite(magf) and np.isfinite(errf)):
-                continue
-            mjd = float(row["mjd"])
-            mjds.append(mjd)
-            iso = Time(mjd, format="mjd").isot
-            filt = str(row["filter"])  # full survey name (ztfg, sdssg, ...)
+        lim = _limit_mag(row)
+        if lim is not None:
+            nondets.append((mjd, filt, lim))
+
+    # Keep the single most-recent upper limit before the first detection (pins
+    # the explosion epoch — "not there yet") plus every upper limit within the
+    # detection window; drop the rest (older pre-detection / post-peak limits add
+    # little and would just inflate the fit).
+    kept: list[tuple[float, str, float]] = []
+    if dets:
+        first_det = min(d[0] for d in dets)
+        last_det = max(d[0] for d in dets)
+        # Only in bands we actually fit: a lone UL in an otherwise-undetected
+        # band can't constrain its amp_mag/base_mag and just yields a garbage
+        # model curve, so restrict upper limits to filters that have detections.
+        det_filters = {d[1] for d in dets}
+        usable = [n for n in nondets if n[1] in det_filters]
+        pre = [n for n in usable if n[0] < first_det]
+        if pre:
+            kept.append(max(pre, key=lambda n: n[0]))
+        kept += [n for n in usable if first_det <= n[0] <= last_det]
+
+    data_path = outdir / "data.dat"
+    filters: list[str] = []
+    with data_path.open("w") as fh:
+        for mjd, filt, mag, err in sorted(dets):
             if filt not in filters:
                 filters.append(filt)
-            fh.write(f"{iso} {filt} {magf} {errf}\n")
-            n_det += 1
-    return data_path, (min(mjds) if mjds else 0.0), filters, n_det
+            fh.write(f"{Time(mjd, format='mjd').isot} {filt} {mag} {err}\n")
+        for mjd, filt, lim in sorted(kept):
+            if filt not in filters:
+                filters.append(filt)
+            fh.write(f"{Time(mjd, format='mjd').isot} {filt} {lim} inf\n")
+
+    min_det_mjd = min((d[0] for d in dets), default=0.0)
+    return data_path, min_det_mjd, filters, len(dets)
 
 
 def count_detections(payload: dict) -> int:
@@ -101,15 +147,35 @@ def count_detections(payload: dict) -> int:
     return n_det
 
 
-def _default_param_range(name: str) -> tuple[float, float]:
-    """Analytic-model parameter ranges by name pattern; the prior fallback when
-    none is supplied. Overridable via analysis_parameters['prior_ranges']."""
+def _default_param_range(
+    name: str, mag_bright: float | None = None, mag_faint: float | None = None
+) -> tuple[float, float]:
+    """Analytic-model parameter ranges by name pattern. Kept physical (wide flat
+    priors let the sampler wander and never constrain); the apparent-magnitude
+    amplitudes are anchored to the observed data when available. Overridable via
+    analysis_parameters['prior_ranges']."""
     nl = name.lower()
-    if "amp_mag" in nl or "base_mag" in nl:
+    if "amp_mag" in nl:  # peak apparent magnitude — near the brightest detection
+        if mag_bright is not None:
+            return (mag_bright - 1.5, mag_faint + 1.5)
         return (14.0, 26.0)
+    if "base_mag" in nl:  # host-subtracted photometry -> faint/negligible baseline
+        if mag_faint is not None:
+            return (mag_faint + 1.5, mag_faint + 6.0)
+        return (22.0, 30.0)
+    # Physical timescales in log10 days (after Villar et al.): rise ~0.3-16 d,
+    # fall ~2-160 d — far tighter than a blanket [-3, 2].
+    if "log10" in nl and "rise" in nl:
+        return (-0.5, 1.2)
+    if "log10" in nl and "fall" in nl:
+        return (0.3, 2.2)
     if "log10" in nl:
-        return (-3.0, 2.0)
-    if "t0" in nl or "time" in nl or nl.startswith("t_") or "tau" in nl:
+        return (-1.5, 2.0)
+    # Peak time relative to the trigger; the old [-1, 5] railed against the prior
+    # for anything but the fastest transients.
+    if "t0" in nl:
+        return (-5.0, 30.0)
+    if "time" in nl or nl.startswith("t_") or "tau" in nl:
         return (-1.0, 5.0)
     if "alpha" in nl or "beta" in nl or "index" in nl or "gamma" in nl:
         return (0.0, 3.0)
@@ -139,7 +205,10 @@ def _build_fiesta_model(source, em_transient_class, filters):
             and issubclass(cls, AnalyticalModel)
             and cls is not AnalyticalModel
         ):
-            return cls(filters=filters), "analytic"
+            # Phenomenological models fit apparent magnitudes (amp_mag) directly
+            # and have no distance; physics-analytic models (Arnett, ...) do.
+            kind = "phenomenological" if mod == "phenomenological_models" else "analytic"
+            return cls(filters=filters), kind
 
     from fiesta.inference.lightcurve_model import AfterglowFlux, BullaFlux
 
@@ -148,13 +217,24 @@ def _build_fiesta_model(source, em_transient_class, filters):
     return BullaFlux(name=source, filters=filters), "surrogate"
 
 
-def _build_fiesta_prior(model, kind, overrides, sample_distance):
+def _build_fiesta_prior(
+    model, kind, overrides, sample_distance, band_mags=None, global_mags=(None, None)
+):
     from fiesta.inference.prior import ConstrainedPrior, Sine, Uniform
 
     def make(name, lo, hi):
         lo, hi = overrides.get(name, (lo, hi))
         cls = Sine if "inclination" in name.lower() else Uniform
         return cls(xmin=float(lo), xmax=float(hi), naming=[name])
+
+    def mags_for(name):
+        # amp_mag_{band}/base_mag_{band} anchor to that band's own observed span
+        # (a band that doesn't sample the faint tail otherwise has a degenerate
+        # amplitude/baseline); fall back to the global span.
+        for prefix in ("amp_mag_", "base_mag_"):
+            if name.startswith(prefix):
+                return (band_mags or {}).get(name[len(prefix) :], global_mags)
+        return (None, None)
 
     pl = []
     if kind == "surrogate":
@@ -165,7 +245,7 @@ def _build_fiesta_prior(model, kind, overrides, sample_distance):
         for name in model.parameter_names:
             if name in ("redshift", "luminosity_distance"):
                 continue
-            pl.append(make(name, *_default_param_range(name)))
+            pl.append(make(name, *_default_param_range(name, *mags_for(name))))
     if sample_distance:
         pl.append(make("luminosity_distance", 1.0, 1000.0))
     return ConstrainedPrior(pl)
@@ -242,6 +322,16 @@ def run_from_skyportal_inputs(
     filters = list(data.keys())
     model, kind = _build_fiesta_model(source, params.get("em_transient_class"), filters)
 
+    # Observed apparent-magnitude span per band (detections have finite error;
+    # upper limits are inf) — used to anchor each band's amp/base priors.
+    band_mags: dict = {}
+    for _f, _arr in data.items():
+        _ms = [float(r[1]) for r in np.asarray(_arr) if np.isfinite(r[2])]
+        if _ms:
+            band_mags[_f] = (min(_ms), max(_ms))
+    _all = [m for bm in band_mags.values() for m in bm]
+    global_mags = (min(_all), max(_all)) if _all else (None, None)
+
     redshift = _resolve_redshift(payload)
     have_z = redshift is not None and redshift > 0
     # With no measured redshift we can't fix the distance, so SAMPLE over it: the
@@ -249,7 +339,10 @@ def run_from_skyportal_inputs(
     # model.predict() scales each posterior draw by the sampled distance. An explicit
     # analysis_parameters['sample_distance'] still wins. Redshift is fixed to 0 in
     # this case (z=0 observer frame for the mjd grid); the distance carries the fit.
-    sample_distance = bool(params.get("sample_distance", not have_z))
+    # Phenomenological models use apparent-mag amplitudes directly and have no
+    # distance parameter; sampling one just adds an unconstrained nuisance
+    # dimension that wrecks convergence. Only non-phenomenological models sample.
+    sample_distance = kind != "phenomenological" and bool(params.get("sample_distance", not have_z))
     fixed: dict[str, float] = {
         "redshift": float(redshift) if have_z else float(params.get("redshift", 0.0))
     }
@@ -263,7 +356,14 @@ def run_from_skyportal_inputs(
         else:
             fixed["luminosity_distance"] = float(params.get("luminosity_distance", 100.0))
 
-    prior = _build_fiesta_prior(model, kind, params.get("prior_ranges") or {}, sample_distance)
+    prior = _build_fiesta_prior(
+        model,
+        kind,
+        params.get("prior_ranges") or {},
+        sample_distance,
+        band_mags,
+        global_mags,
+    )
     trigger_time = float(params.get("trigger_time", t0 - float(params.get("t0_offset", 2.0))))
     sampler = str(params.get("sampler", "blackjax-smc"))
 
@@ -279,6 +379,10 @@ def run_from_skyportal_inputs(
     except Exception:  # noqa: BLE001 — fall back to the requested window
         pass
 
+    # Systematic error added in quadrature to each point. Surrogate (kilonova)
+    # models want ~0.3 mag for model inadequacy; the analytic/phenomenological
+    # SN fits trust ZTF's ~0.1 mag data far more.
+    default_error_budget = 0.3 if kind == "surrogate" else 0.05
     likelihood = EMLikelihood(
         model,
         data,
@@ -286,6 +390,7 @@ def run_from_skyportal_inputs(
         data_tmin=data_tmin,
         data_tmax=data_tmax,
         fixed_params=fixed,
+        error_budget=float(params.get("error_budget", default_error_budget)),
     )
     # Memory-heavy models (e.g. CSMInteraction, with a 500-pt internal grid)
     # can OOM the GPU at the 8000-particle default; expose n_particles to dial down.
