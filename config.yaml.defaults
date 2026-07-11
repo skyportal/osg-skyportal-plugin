@@ -38,6 +38,15 @@ services:
                     # staged to OSDF. Stamped onto wrapper jobs as +SingularityImage.
                     # e.g. osdf:///ospool/ap41/data/<user>/fiesta-v1.sif
                     singularity_image: osdf:///ospool/ap41/data/michael.coughlin/fiesta-v1.sif
+                    # GPU: request_gpus>0 routes the job to GPU glideins. Set it
+                    # per-request (with a singularity_image pointing at the CUDA
+                    # .sif, containers/fiesta-gpu.def) for Tier B/C models (physics
+                    # + surrogate) — ~10-50x faster; phenomenological models don't
+                    # benefit and should stay on CPU. 0 = CPU-only.
+                    request_gpus: 0
+                    # Extra startd constraint for GPU jobs (e.g. min GPU RAM);
+                    # "" = any GPU. Appended to requirements when request_gpus>0.
+                    gpu_requirements: ""
                 poller:
                     # Seconds between condor_q sweeps. Bursty workloads → drop to 10-30.
                     interval_seconds: 60

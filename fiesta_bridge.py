@@ -163,6 +163,13 @@ def _default_param_range(
         if mag_faint is not None:
             return (mag_faint + 1.5, mag_faint + 6.0)
         return (22.0, 30.0)
+    # EvolvingBlackbody physical scales (log10 K / log10 cm / days).
+    if "log10_temperature" in nl:
+        return (3.3, 4.6)  # ~2000-40000 K
+    if "log10_radius" in nl:
+        return (13.0, 16.0)  # ~1e13-1e16 cm
+    if "peak_time" in nl:
+        return (0.0, 30.0)  # days
     # Physical timescales in log10 days (after Villar et al.): rise ~0.3-16 d,
     # fall ~2-160 d — far tighter than a blanket [-3, 2].
     if "log10" in nl and "rise" in nl:
@@ -190,6 +197,9 @@ def _build_fiesta_model(source, em_transient_class, filters):
     import importlib
 
     from fiesta.inference.analytical_models.base import AnalyticalModel
+    from fiesta.inference.analytical_models.phenomenological_models import (
+        PhenomenologicalModel,
+    )
 
     for mod in (
         "phenomenological_models",
@@ -205,9 +215,11 @@ def _build_fiesta_model(source, em_transient_class, filters):
             and issubclass(cls, AnalyticalModel)
             and cls is not AnalyticalModel
         ):
-            # Phenomenological models fit apparent magnitudes (amp_mag) directly
-            # and have no distance; physics-analytic models (Arnett, ...) do.
-            kind = "phenomenological" if mod == "phenomenological_models" else "analytic"
+            # Only amp_mag-based PhenomenologicalModel subclasses (Bazin/Villar/
+            # ...) skip distance; physics models — including EvolvingBlackbody,
+            # which lives in the phenomenological module but computes L+R through
+            # a blackbody SED — need a distance.
+            kind = "phenomenological" if issubclass(cls, PhenomenologicalModel) else "analytic"
             return cls(filters=filters), kind
 
     from fiesta.inference.lightcurve_model import AfterglowFlux, BullaFlux

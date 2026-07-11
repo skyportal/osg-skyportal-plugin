@@ -1,0 +1,30 @@
+# GPU variant of the lean fiesta runtime (see fiesta.def). Same image + baked
+# surrogates, but jax with CUDA12 wheels so Tier B/C models (physics analytic +
+# NN surrogates) run on a GPU. Route jobs here with request_gpus>=1 and a
+# per-request singularity_image pointing at this .sif.
+#
+#   apptainer build --fakeroot --mksquashfs-args "-processors 1" fiesta-gpu.sif fiesta-gpu.def
+Bootstrap: docker
+From: ubuntu:24.04
+
+%post
+    set -e
+    export PIP_BREAK_SYSTEM_PACKAGES=1 DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y python3 python3-pip git build-essential
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+    pip3 install uv
+    # CUDA userspace ships in the jax[cuda12] pip wheels; the GPU node provides
+    # the driver. jax falls back to CPU if no GPU is visible, so this .sif also
+    # runs (slowly) on CPU-only slots.
+    uv pip install --system --break-system-packages fiestaem blackjax "jax[cuda12]"
+
+    # Bake the KN surrogates (a read-only .sif can't download on a worker).
+    # Bu2026_MLP is the recommended GPU target; keep Bu2025_MLP for compat.
+    python3 -c "from fiesta.surrogates.manage_surrogates import download_surrogate; download_surrogate('Bu2025_MLP'); download_surrogate('Bu2026_MLP')"
+
+    python3 -c "import fiesta, blackjax, jax; print('fiesta+blackjax+jax', jax.__version__)"
+
+%runscript
+    exec python3 "$@"

@@ -219,6 +219,38 @@ def test_submit_stamps_skyportal_classads(plugin_cfg, last_submit_desc):
     assert last_submit_desc["+SkyPortalResourceId"] == '"ZTF20abc"'
 
 
+def test_gpu_params_route_to_gpu_image_and_slots(plugin_cfg, last_submit_desc):
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={
+            "analysis_parameters": {
+                "request_gpus": 1,
+                "singularity_image": "osdf:///ospool/ap41/data/x/fiesta-gpu.sif",
+                "gpu_requirements": "(GPUs_GlobalMemoryMb >= 8000)",
+            }
+        },
+    )
+    assert last_submit_desc["request_gpus"] == "1"
+    assert last_submit_desc["+SingularityImage"] == '"osdf:///ospool/ap41/data/x/fiesta-gpu.sif"'
+    assert "GPUs_GlobalMemoryMb >= 8000" in last_submit_desc["requirements"]
+
+
+def test_no_gpu_params_stays_cpu_only(plugin_cfg, last_submit_desc):
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={},
+    )
+    assert "request_gpus" not in last_submit_desc
+
+
 def test_rehydrate_picks_up_jobs_from_schedd(plugin_cfg, fake_queue):
     # Simulate a restart: pre-populate the schedd as if jobs are still running.
     fake_queue.append(

@@ -256,6 +256,23 @@ def _stage_wrapper_job(
     return overrides, output_url
 
 
+def _apply_gpu_and_image(submit_desc: dict, params: dict, defaults: dict) -> None:
+    """Stamp the (optionally per-request) image and GPU resources onto a submit
+    desc. request_gpus>0 routes the job to GPU glideins; a per-request
+    singularity_image lets Tier B/C models pull the CUDA fiesta .sif while
+    phenomenological models keep the CPU one. Call after cpu_requirements so
+    gpu_requirements appends last."""
+    image = params.get("singularity_image", defaults.get("singularity_image"))
+    if image:
+        submit_desc["+SingularityImage"] = f'"{image}"'
+    n_gpus = int(params.get("request_gpus", defaults.get("request_gpus", 0)) or 0)
+    if n_gpus > 0:
+        submit_desc["request_gpus"] = str(n_gpus)
+        gpu_req = params.get("gpu_requirements", defaults.get("gpu_requirements", ""))
+        if gpu_req:
+            submit_desc["requirements"] += f" && {gpu_req}"
+
+
 def submit_job(
     cfg: dict,
     analysis_name: str,
@@ -309,8 +326,7 @@ def submit_job(
     submit_desc["+MaxRuntime"] = str(
         int(params.get("max_runtime_seconds", defaults["max_runtime_seconds"]))
     )
-    if defaults.get("singularity_image"):
-        submit_desc["+SingularityImage"] = f'"{defaults["singularity_image"]}"'
+    _apply_gpu_and_image(submit_desc, params, defaults)
     submit_desc.update(wrapper_overrides)
     # Round-trip the SkyPortal binding through the schedd so we can rehydrate after restart.
     submit_desc["+SkyPortalAnalysisName"] = f'"{analysis_name}"'
@@ -352,7 +368,9 @@ def _submit_signature(cfg: dict, params: dict) -> tuple:
         str(params.get("request_disk", d["request_disk"])),
         str(params.get("max_runtime_seconds", d["max_runtime_seconds"])),
         str(params.get("cpu_requirements", d.get("cpu_requirements", ""))),
-        str(d.get("singularity_image", "")),
+        str(params.get("singularity_image", d.get("singularity_image", ""))),
+        str(params.get("request_gpus", d.get("request_gpus", 0))),
+        str(params.get("gpu_requirements", d.get("gpu_requirements", ""))),
     )
 
 
@@ -397,8 +415,7 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     cpu_req = p0.get("cpu_requirements", defaults.get("cpu_requirements", "(has_avx == True)"))
     if cpu_req:
         submit_desc["requirements"] += f" && {cpu_req}"
-    if defaults.get("singularity_image"):
-        submit_desc["+SingularityImage"] = f'"{defaults["singularity_image"]}"'
+    _apply_gpu_and_image(submit_desc, p0, defaults)
     env_parts = []
     if out_prefix:
         env_parts.append("OSDF_OUTPUT_URL=$(sp_osdf)")
