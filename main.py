@@ -229,6 +229,7 @@ def _stage_wrapper_job(
     plugin_dir = Path(__file__).parent
     wrapper_src = (plugin_dir / "fiesta_wrapper.py").resolve()
     bridge_src = (plugin_dir / "fiesta_bridge.py").resolve()
+    redback_src = (plugin_dir / "redback_bridge.py").resolve()
 
     output_url = None
     osdf_cfg = cfg.get("osdf") or {}
@@ -244,10 +245,11 @@ def _stage_wrapper_job(
 
     # No initialdir: let Iwd default to the plugin cwd so spooled output files
     # (basenames) are retrieved next to where the poller reads them.
+    inputs_json = job_dir / "inputs.json"
     overrides = {
         "executable": "/usr/bin/python3",
         "arguments": "fiesta_wrapper.py",
-        "transfer_input_files": f"{wrapper_src},{bridge_src},{job_dir / 'inputs.json'}",
+        "transfer_input_files": f"{wrapper_src},{bridge_src},{redback_src},{inputs_json}",
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
     }
@@ -385,6 +387,7 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     plugin_dir = Path(__file__).parent
     wrapper_src = (plugin_dir / "fiesta_wrapper.py").resolve()
     bridge_src = (plugin_dir / "fiesta_bridge.py").resolve()
+    redback_src = (plugin_dir / "redback_bridge.py").resolve()
     staging_root = Path(cfg.get("staging_dir", "staging")).resolve()
     osdf_cfg = cfg.get("osdf") or {}
     out_prefix = osdf_cfg.get("output_prefix")
@@ -397,7 +400,7 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
         "transfer_executable": "False",
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
-        "transfer_input_files": f"{wrapper_src},{bridge_src},$(inputs_json)",
+        "transfer_input_files": f"{wrapper_src},{bridge_src},{redback_src},$(inputs_json)",
         "output": "job.$(ClusterId).$(ProcId).out",
         "error": "job.$(ClusterId).$(ProcId).err",
         "request_cpus": str(p0.get("request_cpus", defaults["request_cpus"])),

@@ -46,8 +46,10 @@ def _materialize_inputs(inputs: dict) -> dict:
 
 
 def run_fit(inputs: dict) -> dict:
-    """Fit via fiesta_bridge (lazy import so this module loads without fiesta).
-    Returns a stub when analysis_parameters.dry_run is set."""
+    """Fit via the selected backend bridge (lazy import so this module loads
+    without fiesta/redback). analysis_parameters.backend picks the bridge —
+    "fiesta" (default) or "redback" (redback-jax). Both bridges share the same
+    payload and return contract. Returns a stub when dry_run is set."""
     params = inputs.get("analysis_parameters") or {}
     # SkyPortal sends optional params as strings, so "False" must be falsy.
     dry_run = str(params.get("dry_run", "")).strip().lower() in ("true", "1", "yes", "t")
@@ -58,7 +60,11 @@ def run_fit(inputs: dict) -> dict:
             "_source": params.get("source", "Bu2025_MLP"),
         }
 
-    from fiesta_bridge import run_from_skyportal_inputs  # shipped with this wrapper
+    backend = str(params.get("backend", "fiesta")).strip().lower()
+    if backend == "redback":
+        from redback_bridge import run_from_skyportal_inputs  # shipped per-job
+    else:
+        from fiesta_bridge import run_from_skyportal_inputs  # shipped per-job
 
     inputs = _materialize_inputs(inputs)
     resource_id = inputs.get("resource_id", "obj")
