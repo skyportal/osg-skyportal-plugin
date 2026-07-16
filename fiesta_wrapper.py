@@ -94,15 +94,21 @@ def bundle_for_skyportal(
     if fit_result.get("source"):
         analysis["model_name"] = fit_result["source"]
     if result_file is not None and result_file.exists():
-        analysis["results"] = {
-            "format": result_file.suffix.lstrip(".") or "bin",
-            "data": base64.b64encode(result_file.read_bytes()).decode(),
-        }
+        suffix = result_file.suffix.lstrip(".") or "bin"
+        if suffix == "json":
+            # SkyPortal's "json" results format expects the object itself, not a
+            # base64-encoded string (which it would otherwise render per-char).
+            analysis["results"] = {
+                "format": "json",
+                "data": json.loads(result_file.read_text()),
+            }
+        else:
+            analysis["results"] = {
+                "format": suffix,
+                "data": base64.b64encode(result_file.read_bytes()).decode(),
+            }
     if fit_result.get("_stub") and "results" not in analysis:
-        analysis["results"] = {
-            "format": "json",
-            "data": base64.b64encode(json.dumps(fit_result).encode()).decode(),
-        }
+        analysis["results"] = {"format": "json", "data": fit_result}
     # Nested samplers give a log Bayes factor; fiesta-native (MCMC) doesn't, so
     # fall back to the fit's own message.
     if fit_result.get("log_bayes_factor") is not None:
@@ -239,9 +245,7 @@ def main() -> int:
                         "n_detections": n_det,  # detections used (run versioning)
                         "results": {
                             "format": "json",
-                            "data": base64.b64encode(
-                                json.dumps({"models": medians, "errors": errors}).encode()
-                            ).decode(),
+                            "data": {"models": medians, "errors": errors},
                         },
                     },
                 }

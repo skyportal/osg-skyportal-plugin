@@ -1,6 +1,5 @@
 """Tests for the OSG-side fiesta wrapper. The real fiesta path is gated behind dry_run."""
 
-import base64
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -53,8 +52,8 @@ def test_bundle_for_skyportal_stub_includes_results():
     bundle = fiesta_wrapper.bundle_for_skyportal(stub)
     assert bundle["status"] == "success"
     assert "log Bayes factor=0.5" in bundle["message"]
-    decoded = json.loads(base64.b64decode(bundle["analysis"]["results"]["data"]))
-    assert decoded == stub
+    assert bundle["analysis"]["results"]["format"] == "json"
+    assert bundle["analysis"]["results"]["data"] == stub
 
 
 def test_bundle_for_skyportal_uses_fit_message_without_evidence():
@@ -104,7 +103,7 @@ def test_main_dry_run_round_trip(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out.strip()
     bundle = json.loads(out)
     assert bundle["status"] == "success"
-    assert "AfterglowModel" in base64.b64decode(bundle["analysis"]["results"]["data"]).decode()
+    assert "AfterglowModel" in json.dumps(bundle["analysis"]["results"]["data"])
 
 
 def test_main_failure_path_writes_failure_bundle(tmp_path, monkeypatch, capsys):
