@@ -14,6 +14,7 @@ import asyncio
 import base64
 import functools
 import json
+import math
 import os
 import signal
 import time
@@ -730,11 +731,23 @@ def build_callback_body(rec: JobRecord, cfg: dict | None = None) -> dict:
     }
 
 
+def _json_safe(obj: Any) -> Any:
+    """Replace non-finite floats with None. requests encodes with allow_nan=False,
+    so a single NaN/inf from a fit would otherwise sink the whole callback."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 def post_callback(rec: JobRecord, cfg: dict | None = None) -> bool:
     """POST the SkyPortal-shaped result to rec.callback_url. Return True on send."""
     if not rec.callback_url or rec.callback_method.upper() != "POST":
         return False
-    body = build_callback_body(rec, cfg)
+    body = _json_safe(build_callback_body(rec, cfg))
     try:
         requests.post(rec.callback_url, json=body, timeout=30)
         return True

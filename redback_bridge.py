@@ -298,7 +298,20 @@ def run_from_skyportal_inputs(
         name: [float(x) for x in np.asarray(samp)] for name, samp in result.samples.items()
     }
 
-    (outdir / "redback_result.json").write_text(
-        json.dumps({"medians": medians, "log_evidence": out["log_evidence"]})
+    # The wrapper attaches this file as the SkyPortal "results" blob (same
+    # contract as fiesta_bridge); without json_result_file the fit's numbers
+    # never reach SkyPortal.
+    result_file = outdir / "redback_result.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "source": source,
+                "medians": medians,
+                "log_evidence": out["log_evidence"],
+                "log_evidence_error": out["log_evidence_error"],
+                "n_detections": n_det,
+            }
+        )
     )
+    out["json_result_file"] = str(result_file)
     return out
