@@ -26,6 +26,11 @@ try:
 except ImportError:
     requests = None
 
+# Reuse JAX-compiled kernels across fits within this job (grouped/batched runs)
+# so only the first compile pays the cost. Set before jax loads (bridges import
+# it lazily). Ephemeral OSPool jobs => no cross-job reuse; that's loop-in-job's.
+os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(Path.cwd() / ".jax_cache"))
+
 
 def load_inputs(path: Path = Path("inputs.json")) -> dict:
     return json.loads(path.read_text())

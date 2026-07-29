@@ -575,5 +575,46 @@ def test_submit_jobs_batch_one_cluster_many_procs(plugin_cfg, tmp_path, last_sub
     assert "has_avx" in last_submit_desc["requirements"]
 
 
+def test_merge_jax_cache_folds_returned_entries(plugin_cfg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Shared cache lives outside cwd; a job's returned dir shares its basename.
+    shared = tmp_path / "store" / "jax_cache"
+    shared.mkdir(parents=True)
+    (shared / "old.bin").write_bytes(b"OLD")
+    plugin_cfg["jax_cache_dir"] = str(shared)
+
+    returned = tmp_path / "jax_cache"
+    (returned / "sub").mkdir(parents=True)
+    (returned / "new.bin").write_bytes(b"NEW")
+    (returned / "sub" / "k.bin").write_bytes(b"K")
+    (returned / "old.bin").write_bytes(b"CLOBBER")  # content-addressed: must not win
+
+    main._merge_jax_cache(plugin_cfg)
+
+    assert (shared / "new.bin").read_bytes() == b"NEW"  # new entry folded in
+    assert (shared / "sub" / "k.bin").read_bytes() == b"K"  # nested preserved
+    assert (shared / "old.bin").read_bytes() == b"OLD"  # existing not clobbered
+    assert not returned.exists()  # returned dir cleared for the next job
+
+
+def test_merge_jax_cache_noop_without_config(plugin_cfg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    plugin_cfg.pop("jax_cache_dir", None)
+    (tmp_path / "jax_cache").mkdir()
+    main._merge_jax_cache(plugin_cfg)  # no config -> no-op, no crash
+    assert (tmp_path / "jax_cache").exists()
+
+
+def test_merge_jax_cache_guards_against_self_delete(plugin_cfg, tmp_path, monkeypatch):
+    # If the shared dir *is* cwd/<basename>, never merge-into-self and delete it.
+    monkeypatch.chdir(tmp_path)
+    shared = tmp_path / "jax_cache"
+    shared.mkdir()
+    (shared / "keep.bin").write_bytes(b"KEEP")
+    plugin_cfg["jax_cache_dir"] = str(shared)
+    main._merge_jax_cache(plugin_cfg)
+    assert (shared / "keep.bin").exists()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

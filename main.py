@@ -16,6 +16,7 @@ import functools
 import json
 import math
 import os
+import shutil
 import signal
 import time
 import uuid
@@ -247,10 +248,22 @@ def _stage_wrapper_job(
     # No initialdir: let Iwd default to the plugin cwd so spooled output files
     # (basenames) are retrieved next to where the poller reads them.
     inputs_json = job_dir / "inputs.json"
+    transfer = [str(wrapper_src), str(bridge_src), str(redback_src), str(inputs_json)]
+
+    # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
+    # fits reuse compiled kernels. Absent/empty => wrapper's per-job cache. The
+    # dir lands in the sandbox under its basename; populate it out-of-band.
+    jax_cache_dir = cfg.get("jax_cache_dir")
+    if jax_cache_dir:
+        cache_path = Path(jax_cache_dir).resolve()
+        if cache_path.is_dir() and any(cache_path.iterdir()):
+            transfer.append(str(cache_path))
+            env_parts.append(f"JAX_COMPILATION_CACHE_DIR={cache_path.name}")
+
     overrides = {
         "executable": "/usr/bin/python3",
         "arguments": "fiesta_wrapper.py",
-        "transfer_input_files": f"{wrapper_src},{bridge_src},{redback_src},{inputs_json}",
+        "transfer_input_files": ",".join(transfer),
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
     }
@@ -665,6 +678,32 @@ def _retrieve_outputs(schedd, rec: JobRecord) -> None:
         log(f"retrieve failed for {rec.cluster_id}.{rec.proc_id}: {e!r}")
 
 
+def _merge_jax_cache(cfg: dict) -> None:
+    """Fold newly-compiled JAX kernels a completed job returned into the shared
+    cache dir so later fits skip compilation. Content-addressed, so copy-no-clobber
+    merges are safe. Runs in the sequential poll loop right after retrieve, so the
+    returned dir never overlaps between jobs; best-effort, never breaks a callback.
+    """
+    shared = cfg.get("jax_cache_dir")
+    if not shared:
+        return
+    shared_path = Path(shared).resolve()
+    returned = (Path.cwd() / shared_path.name).resolve()
+    if returned == shared_path or not returned.is_dir():
+        return  # shared cache must live outside the output cwd; else no-op
+    try:
+        shared_path.mkdir(parents=True, exist_ok=True)
+        for f in returned.rglob("*"):
+            if f.is_file():
+                target = shared_path / f.relative_to(returned)
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, target)
+        shutil.rmtree(returned, ignore_errors=True)
+    except Exception as e:  # noqa: BLE001 — cache is best-effort
+        log(f"jax cache merge failed: {e!r}")
+
+
 def collect_outputs(rec: JobRecord) -> dict[str, Any]:
     """Stdout/stderr fallback when no OSDF bundle exists."""
     stdout_path = Path(f"job.{rec.cluster_id}.{rec.proc_id}.out")
@@ -809,6 +848,7 @@ def poll_once(cfg: dict) -> None:
         if rec.status in TERMINAL and not rec.callback_posted:
             if rec.status == "completed":
                 _retrieve_outputs(schedd, rec)
+                _merge_jax_cache(cfg)
             rec.callback_posted = post_callback(rec, cfg)
 
 
