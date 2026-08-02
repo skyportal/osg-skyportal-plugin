@@ -159,12 +159,25 @@ def count_detections(payload: dict) -> int:
     return _parse_photometry(payload)[4]
 
 
-def _prior_bounds(source: str, overrides: dict, min_mjd: float) -> dict:
+def _prior_bounds(
+    source: str,
+    overrides: dict,
+    min_mjd: float,
+    trigger_time: float | None = None,
+    t0_window: float = 1e-3,
+) -> dict:
+    """Uniform prior bounds per parameter. A known explosion time (MJD) can be
+    supplied via ``trigger_time``: the epoch param (``t0_key``) is then pinned to
+    a narrow window around it. redback-jax reads t0 from the *sampled* params and
+    ignores a fixed one, so we fix it with a near-degenerate prior rather than by
+    moving it to fixed_params. An explicit ``prior_ranges`` entry for t0 wins."""
     reg = _model_registry()[source]
     bounds: dict[str, tuple[float, float]] = {}
     for name, b in reg["priors"].items():
         if name in overrides:
             lo, hi = overrides[name]
+        elif name == reg["t0_key"] and trigger_time is not None:
+            lo, hi = trigger_time - t0_window, trigger_time + t0_window
         elif name == reg["t0_key"] and b is None:
             lo, hi = min_mjd - 15.0, min_mjd + 10.0
         else:
@@ -252,7 +265,17 @@ def run_from_skyportal_inputs(
         name=str(resource_id),
         redshift=redshift,
     )
-    bounds = _prior_bounds(source, params.get("prior_ranges") or {}, min_mjd)
+    # Honor an explicit explosion/trigger time (MJD) like fiesta does: pin the
+    # epoch param to it instead of fitting it (see _prior_bounds).
+    tt = params.get("trigger_time")
+    try:
+        trigger_time = float(tt) if tt is not None and str(tt).strip() != "" else None
+    except (TypeError, ValueError):
+        trigger_time = None
+    t0_window = float(params.get("t0_window", 1e-3))
+    bounds = _prior_bounds(
+        source, params.get("prior_ranges") or {}, min_mjd, trigger_time, t0_window
+    )
     prior = Prior([Uniform(lo, hi, name=n) for n, (lo, hi) in bounds.items()])
     likelihood = Likelihood(
         model=reg["model"],
@@ -282,7 +305,8 @@ def run_from_skyportal_inputs(
 
     out: dict[str, Any] = {
         "status": "success",
-        "message": f"redback fit complete (model={source}, sampler=nested-smc)",
+        "message": f"redback fit complete (model={source}, sampler=nested-smc)"
+        + (f", T0 fixed to MJD {trigger_time}" if trigger_time is not None else ""),
         "source": source,
         "n_detections": n_det,
         "posterior_medians": medians,
