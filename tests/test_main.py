@@ -500,7 +500,9 @@ def test_wrapper_mode_via_config_default(plugin_cfg, last_submit_desc, tmp_path,
         inputs={},
     )
     # Wrapper mode forced by config: ships the wrapper + bridge + inputs.json, runs python3.
-    assert last_submit_desc["executable"] == "/usr/bin/python3"
+    # env resolves python3 via PATH so any image layout works.
+    assert last_submit_desc["executable"] == "/usr/bin/env"
+    assert last_submit_desc["arguments"] == "python3 fiesta_wrapper.py"
     transfer = last_submit_desc["transfer_input_files"]
     assert "fiesta_wrapper.py" in transfer
     assert "fiesta_bridge.py" in transfer
