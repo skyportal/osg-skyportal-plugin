@@ -39,6 +39,12 @@ log = make_log("osg")
 # serializing them (which made the app's start request time out under bursts).
 _SUBMIT_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="osg-submit")
 
+# Read-side schedd work (poller, rehydrate, keepalive) runs here, off the event
+# loop, so a hung security negotiation (SECMAN read failure) can't freeze the
+# HTTP listener. Single worker => these stay serialized (one schedd read
+# connection at a time), matching the old in-loop behaviour minus the blocking.
+_POLL_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="osg-poll")
+
 
 # JobStatus integer encoding per the HTCondor classads documentation.
 CONDOR_STATUS = {
@@ -97,7 +103,8 @@ _SHUTDOWN: "asyncio.Event | None" = None
 def check_caps(cfg: dict, analysis_name: str, resource_id: str | None) -> str | None:
     """Return None if the request fits within configured caps, else a reason string."""
     caps = cfg.get("caps") or {}
-    open_jobs = [r for r in JOBS.values() if r.completed_at is None]
+    # list() snapshots atomically vs concurrent submit-thread adds to JOBS.
+    open_jobs = [r for r in list(JOBS.values()) if r.completed_at is None]
     total_cap = caps.get("max_concurrent_total")
     if total_cap and len(open_jobs) >= total_cap:
         return f"global cap: already {len(open_jobs)} of {total_cap} concurrent jobs"
@@ -126,6 +133,12 @@ def check_caps(cfg: dict, analysis_name: str, resource_id: str | None) -> str | 
 
 def _htcondor():
     """Lazy, version-tolerant import: v1 on Linux APs, v2 (htcondor2) on macOS/conda."""
+    # Bound the schedd security negotiation. A flaky remote schedd sometimes
+    # hangs the read ("SECMAN:2007"); htcondor holds the GIL while it blocks, so
+    # an unbounded hang freezes the whole process (poller + listener). A short
+    # timeout turns a hang into a fast error the poller/submit paths already
+    # tolerate. setdefault: an operator can still override via the environment.
+    os.environ.setdefault("_CONDOR_SEC_CLIENT_AUTHENTICATION_TIMEOUT", "30")
     try:
         import htcondor
     except ModuleNotFoundError:
@@ -217,8 +230,12 @@ def _stage_wrapper_job(
 ) -> tuple[dict, str | None]:
     """Build submit overrides + an OSDF output URL when wrapper-mode is requested."""
     # Wrapper mode can be forced per-service via config (an NMMA service always
-    # wraps) or requested per-job via analysis_parameters.
-    use_wrapper = params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
+    # wraps), named explicitly with the `wrapper` param, or requested per-job
+    # via `use_wrapper`. A named wrapper implies wrapper mode.
+    wrapper = str(params.get("wrapper", "")).strip().lower()
+    use_wrapper = wrapper in ("fiesta", "periodfind") or params.get(
+        "use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False)
+    )
     if not use_wrapper:
         return {}, None
 
@@ -229,9 +246,21 @@ def _stage_wrapper_job(
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "inputs.json").write_text(json.dumps(inputs))
     plugin_dir = Path(__file__).parent
-    wrapper_src = (plugin_dir / "fiesta_wrapper.py").resolve()
-    bridge_src = (plugin_dir / "fiesta_bridge.py").resolve()
-    redback_src = (plugin_dir / "redback_bridge.py").resolve()
+    # Which wrapper runtime to ship. "periodfind" ships its own wrapper+bridge
+    # (period finding, no JAX); anything else is the fiesta/redback runtime.
+    if wrapper == "periodfind":
+        wrapper_name = "periodfind_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "periodfind_wrapper.py").resolve(),
+            (plugin_dir / "periodfind_bridge.py").resolve(),
+        ]
+    else:
+        wrapper_name = "fiesta_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "fiesta_wrapper.py").resolve(),
+            (plugin_dir / "fiesta_bridge.py").resolve(),
+            (plugin_dir / "redback_bridge.py").resolve(),
+        ]
 
     output_url = None
     osdf_cfg = cfg.get("osdf") or {}
@@ -248,21 +277,23 @@ def _stage_wrapper_job(
     # No initialdir: let Iwd default to the plugin cwd so spooled output files
     # (basenames) are retrieved next to where the poller reads them.
     inputs_json = job_dir / "inputs.json"
-    transfer = [str(wrapper_src), str(bridge_src), str(redback_src), str(inputs_json)]
+    transfer = [str(f) for f in wrapper_files] + [str(inputs_json)]
 
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
-    # fits reuse compiled kernels. Absent/empty => wrapper's per-job cache. The
-    # dir lands in the sandbox under its basename; populate it out-of-band.
+    # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).
+    # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under
+    # its basename; populate it out-of-band.
     jax_cache_dir = cfg.get("jax_cache_dir")
-    if jax_cache_dir:
+    if wrapper != "periodfind" and jax_cache_dir:
         cache_path = Path(jax_cache_dir).resolve()
         if cache_path.is_dir() and any(cache_path.iterdir()):
             transfer.append(str(cache_path))
             env_parts.append(f"JAX_COMPILATION_CACHE_DIR={cache_path.name}")
 
     overrides = {
-        "executable": "/usr/bin/python3",
-        "arguments": "fiesta_wrapper.py",
+        # env resolves python3 via PATH, so any image layout works.
+        "executable": "/usr/bin/env",
+        "arguments": f"python3 {wrapper_name}",
         "transfer_input_files": ",".join(transfer),
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
@@ -387,6 +418,9 @@ def _submit_signature(cfg: dict, params: dict) -> tuple:
         str(params.get("singularity_image", d.get("singularity_image", ""))),
         str(params.get("request_gpus", d.get("request_gpus", 0))),
         str(params.get("gpu_requirements", d.get("gpu_requirements", ""))),
+        # Different wrapper runtimes must not share a cluster (one executable
+        # + transfer list per cluster).
+        str(params.get("wrapper", "")),
     )
 
 
@@ -399,22 +433,33 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     defaults = cfg["defaults"]
     schedd = get_schedd(cfg)
     plugin_dir = Path(__file__).parent
-    wrapper_src = (plugin_dir / "fiesta_wrapper.py").resolve()
-    bridge_src = (plugin_dir / "fiesta_bridge.py").resolve()
-    redback_src = (plugin_dir / "redback_bridge.py").resolve()
     staging_root = Path(cfg.get("staging_dir", "staging")).resolve()
     osdf_cfg = cfg.get("osdf") or {}
     out_prefix = osdf_cfg.get("output_prefix")
 
-    # Submit-level knobs from the first item (the group shares them by signature).
+    # Submit-level knobs from the first item (the group shares them by signature,
+    # which includes the image + wrapper, so one cluster is a single runtime).
     p0 = (items[0].get("inputs") or {}).get("analysis_parameters", {}) or {}
+    wrapper = str(p0.get("wrapper", "")).strip().lower()
+    if wrapper == "periodfind":
+        wrapper_name = "periodfind_wrapper.py"
+        wrapper_files = [plugin_dir / "periodfind_wrapper.py", plugin_dir / "periodfind_bridge.py"]
+    else:
+        wrapper_name = "fiesta_wrapper.py"
+        wrapper_files = [
+            plugin_dir / "fiesta_wrapper.py",
+            plugin_dir / "fiesta_bridge.py",
+            plugin_dir / "redback_bridge.py",
+        ]
+    transfer_files = ",".join(str(f.resolve()) for f in wrapper_files)
     submit_desc: dict[str, str] = {
-        "executable": "/usr/bin/python3",
-        "arguments": "fiesta_wrapper.py",
+        # env resolves python3 via PATH, so any image layout works.
+        "executable": "/usr/bin/env",
+        "arguments": f"python3 {wrapper_name}",
         "transfer_executable": "False",
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
-        "transfer_input_files": f"{wrapper_src},{bridge_src},{redback_src},$(inputs_json)",
+        "transfer_input_files": f"{transfer_files},$(inputs_json)",
         "output": "job.$(ClusterId).$(ProcId).out",
         "error": "job.$(ClusterId).$(ProcId).err",
         "request_cpus": str(p0.get("request_cpus", defaults["request_cpus"])),
@@ -800,7 +845,9 @@ def poll_once(cfg: dict) -> None:
     if not JOBS:
         return
     schedd = get_schedd(cfg)
-    open_keys = [k for k, r in JOBS.items() if r.completed_at is None]
+    # list() snapshots atomically (one C call) so a concurrent submit adding to
+    # JOBS from _SUBMIT_POOL can't raise "dict changed size during iteration".
+    open_keys = [k for k, r in list(JOBS.items()) if r.completed_at is None]
     if not open_keys:
         return
     # Query distinct clusters (a batched submit shares one ClusterId across many
@@ -854,9 +901,11 @@ def poll_once(cfg: dict) -> None:
 
 async def poller_loop(cfg: dict):
     interval = float(cfg["poller"]["interval_seconds"])
+    loop = asyncio.get_running_loop()
     while True:
         try:
-            poll_once(cfg)
+            # Off the event loop: a hung schedd must not freeze the listener.
+            await loop.run_in_executor(_POLL_POOL, poll_once, cfg)
         except Exception as e:  # noqa: BLE001 — poller must outlive any single error
             log(f"poller error: {e!r}")
         await asyncio.sleep(interval)
@@ -980,17 +1029,24 @@ def load_plugin_config() -> dict:
 
 async def amain():
     cfg = load_plugin_config()
-    try:
-        rehydrate_jobs(cfg)
-    except Exception as e:  # noqa: BLE001 — startup must continue even if schedd is briefly down
-        log(f"rehydrate failed (continuing with empty JOBS): {e!r}")
-    try:
-        ensure_keepalive(cfg)
-    except Exception as e:  # noqa: BLE001 — keepalive is best-effort, never block startup
-        log(f"keepalive setup failed (continuing): {e!r}")
+    # Bind the listener FIRST, then touch the schedd. rehydrate + keepalive call
+    # the schedd synchronously and a hung security negotiation (SECMAN read
+    # failure) is uninterruptible, so doing them before app.listen stalled
+    # startup entirely. Run them in a background thread instead — the listener
+    # serves immediately, and JOBS is adopted once the schedd responds.
     app = build_app(cfg)
     server = app.listen(int(cfg["listener"]["port"]), address=cfg["listener"]["host"])
     log(f"listening on {cfg['listener']['host']}:{cfg['listener']['port']}")
+
+    async def _schedd_startup() -> None:
+        loop = asyncio.get_running_loop()
+        for _name, _fn in (("rehydrate", rehydrate_jobs), ("keepalive setup", ensure_keepalive)):
+            try:
+                await loop.run_in_executor(_POLL_POOL, _fn, cfg)
+            except Exception as e:  # noqa: BLE001 — best-effort; the listener is already up
+                log(f"{_name} failed (continuing): {e!r}")
+
+    asyncio.create_task(_schedd_startup())
     asyncio.create_task(poller_loop(cfg))
 
     global _BATCH_QUEUE, _SHUTDOWN
