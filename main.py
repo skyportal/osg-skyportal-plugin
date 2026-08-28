@@ -957,6 +957,22 @@ class AnalysisHandler(tornado.web.RequestHandler):
             self.write({"error": f"missing required keys: {missing}"})
             return
 
+        # Route to the right engine by service name, so a "redback_osg" /
+        # "mosfit_osg" / "periodfind_osg" service runs that backend even when the
+        # request omits the selector param (the wrapper otherwise defaults to
+        # fiesta). An explicit param in the request still wins.
+        name = analysis_name.lower()
+        inputs = data.get("inputs")
+        if isinstance(inputs, dict):
+            params = inputs.setdefault("analysis_parameters", {})
+            if isinstance(params, dict):
+                if "mosfit" in name:
+                    params.setdefault("wrapper", "mosfit")
+                elif "periodfind" in name:
+                    params.setdefault("wrapper", "periodfind")
+                elif "redback" in name:
+                    params.setdefault("backend", "redback")
+
         cap_reason = check_caps(self.cfg, analysis_name, data.get("resource_id"))
         if cap_reason:
             self.set_status(429)
