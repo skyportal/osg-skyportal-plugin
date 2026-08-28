@@ -37,6 +37,9 @@ services:
                     # Lean fiesta-only Apptainer image (containers/fiesta.def),
                     # staged to OSDF. Stamped onto wrapper jobs as +SingularityImage.
                     # e.g. osdf:///ospool/ap41/data/<user>/fiesta-v1.sif
+                    # The mosfit backend (wrapper=mosfit, containers/mosfit.def) uses
+                    # its own image — pass singularity_image per-request pointing at
+                    # the mosfit .sif; this default is the fiesta runtime.
                     singularity_image: osdf:///ospool/ap41/data/michael.coughlin/fiesta-v1.sif
                     # GPU: request_gpus>0 routes the job to GPU glideins. Set it
                     # per-request (with a singularity_image pointing at the CUDA

@@ -233,7 +233,7 @@ def _stage_wrapper_job(
     # wraps), named explicitly with the `wrapper` param, or requested per-job
     # via `use_wrapper`. A named wrapper implies wrapper mode.
     wrapper = str(params.get("wrapper", "")).strip().lower()
-    use_wrapper = wrapper in ("fiesta", "periodfind") or params.get(
+    use_wrapper = wrapper in ("fiesta", "periodfind", "mosfit") or params.get(
         "use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False)
     )
     if not use_wrapper:
@@ -246,13 +246,20 @@ def _stage_wrapper_job(
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "inputs.json").write_text(json.dumps(inputs))
     plugin_dir = Path(__file__).parent
-    # Which wrapper runtime to ship. "periodfind" ships its own wrapper+bridge
-    # (period finding, no JAX); anything else is the fiesta/redback runtime.
+    # Which wrapper runtime to ship. "periodfind" and "mosfit" ship their own
+    # wrapper+bridge (each its own runtime, no JAX); anything else is the
+    # fiesta/redback runtime.
     if wrapper == "periodfind":
         wrapper_name = "periodfind_wrapper.py"
         wrapper_files = [
             (plugin_dir / "periodfind_wrapper.py").resolve(),
             (plugin_dir / "periodfind_bridge.py").resolve(),
+        ]
+    elif wrapper == "mosfit":
+        wrapper_name = "mosfit_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "mosfit_wrapper.py").resolve(),
+            (plugin_dir / "mosfit_bridge.py").resolve(),
         ]
     else:
         wrapper_name = "fiesta_wrapper.py"
@@ -284,7 +291,7 @@ def _stage_wrapper_job(
     # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under
     # its basename; populate it out-of-band.
     jax_cache_dir = cfg.get("jax_cache_dir")
-    if wrapper != "periodfind" and jax_cache_dir:
+    if wrapper not in ("periodfind", "mosfit") and jax_cache_dir:
         cache_path = Path(jax_cache_dir).resolve()
         if cache_path.is_dir() and any(cache_path.iterdir()):
             transfer.append(str(cache_path))
@@ -444,6 +451,9 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     if wrapper == "periodfind":
         wrapper_name = "periodfind_wrapper.py"
         wrapper_files = [plugin_dir / "periodfind_wrapper.py", plugin_dir / "periodfind_bridge.py"]
+    elif wrapper == "mosfit":
+        wrapper_name = "mosfit_wrapper.py"
+        wrapper_files = [plugin_dir / "mosfit_wrapper.py", plugin_dir / "mosfit_bridge.py"]
     else:
         wrapper_name = "fiesta_wrapper.py"
         wrapper_files = [

@@ -97,3 +97,31 @@ Notes:
 - The wrapper + bridge still ship per-job; CVMFS only removes the image transfer.
 - CVMFS fetches only the files a job touches, lazily + cached, so image size is moot.
 - Keep OSDF (`fiesta.def`) as a narrow fallback for fast iteration / unreleased builds.
+
+## MOSFiT image (`mosfit.def`)
+
+A separate runtime for the MOSFiT backend (selected per-request with
+`analysis_parameters.wrapper: "mosfit"`). The plugin ships `mosfit_wrapper.py` +
+`mosfit_bridge.py` per-job, so this image is a generic MOSFiT runtime.
+
+Two things are non-obvious and load-bearing:
+
+1. **Install the guillochon fork, not PyPI `mosfit`.** Only the fork's fetcher
+   runs offline (local event files, no Open-Catalog download) — a worker has no
+   network. The `.def` installs `git+https://github.com/guillochon/MOSFiT.git`.
+2. **ZTF filters are baked in.** MOSFiT resolves `Palomar/ZTF.{g,r,i}` from an SVO
+   download at runtime unless the transmission XMLs are already installed; the
+   `%post` step fetches them into the package `filters/` dir at build time (when
+   the network is available). The bridge emits ZTF photometry with `instrument:
+   "ZTF"` so these curves are used.
+
+Build + stage exactly like the fiesta image (OSDF, or Docker Hub → CVMFS):
+
+```
+apptainer build --fakeroot --mksquashfs-args "-processors 1" mosfit.sif mosfit.def
+# then stage mosfit.sif to OSDF and point a mosfit analysis-service request at it
+# via analysis_parameters.singularity_image, e.g.
+#   osdf:///ospool/ap41/data/<user>/mosfit-v1.sif
+```
+
+MOSFiT is CPU-only (emcee/dynesty) — no GPU variant.
