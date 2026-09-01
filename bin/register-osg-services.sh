@@ -14,12 +14,13 @@ set -euo pipefail
 : "${PYTHONPATH:?set PYTHONPATH to the skyportal checkout so load_env works}"
 cd "$(dirname "$0")/.."
 
-# Redback (JAX) — runs in the fiesta image; only the Arnett model is registered.
+# Redback (JAX) — runs in its own redback-jax image (nsarinastro/redback-jax on
+# CVMFS); only the Arnett model is registered. :latest is CPU, :gpu is CUDA.
 python register_analysis_service.py \
   --name Redback_OSG --display "Redback (OSG)" \
   --listener-url http://localhost:7100/analysis/redback_osg \
   --input-data-types photometry redshift \
-  --optional-params-json '{"source": ["arnett"], "backend": ["redback"], "fix_z": ["True", "False"]}'
+  --optional-params-json '{"source": ["arnett"], "backend": ["redback"], "fix_z": ["True", "False"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:latest", "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu", "docker://nsarinastro/redback-jax"]}'
 
 # MOSFiT — its own image; set singularity_image to the staged mosfit .sif once the
 # container build (mcoughlin/MOSFiT docker branch) is published to OSDF/CVMFS.
