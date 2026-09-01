@@ -276,6 +276,9 @@ def _stage_wrapper_job(
         output_url = prefix.rstrip("/") + f"/{cluster_uuid}.json"
 
     env_parts = []
+    # Tell the wrapper how many cores to pin to, so JAX's CPU threadpool can't
+    # exceed request_cpus and get the job held (see _limit_cpu_affinity).
+    env_parts.append(f"OSG_NUM_CPUS={params.get('request_cpus', cfg['defaults']['request_cpus'])}")
     if output_url:
         env_parts.append(f"OSDF_OUTPUT_URL={output_url}")
     if osdf_cfg.get("write_token_path"):
@@ -489,6 +492,7 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
         submit_desc["requirements"] += f" && {cpu_req}"
     _apply_gpu_and_image(submit_desc, p0, defaults)
     env_parts = []
+    env_parts.append(f"OSG_NUM_CPUS={p0.get('request_cpus', defaults['request_cpus'])}")
     if out_prefix:
         env_parts.append("OSDF_OUTPUT_URL=$(sp_osdf)")
     if osdf_cfg.get("write_token_path"):

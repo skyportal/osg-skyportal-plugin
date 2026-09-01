@@ -15,12 +15,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Redback (JAX) — runs in its own redback-jax image (nsarinastro/redback-jax on
-# CVMFS); only the Arnett model is registered. :latest is CPU, :gpu is CUDA.
+# CVMFS). Models complement Fiesta (central-engine + shock-cooling SNe, which
+# Fiesta lacks). The SMC fit is slow on CPU (~1 hr), so it defaults to GPU
+# (:gpu image + request_gpus=1): seconds-to-minutes and ~1 CPU core. :latest is
+# the CPU fallback. Fits peak ~17 GB, so request_memory defaults high (MB).
 python register_analysis_service.py \
   --name Redback_OSG --display "Redback (OSG)" \
   --listener-url http://localhost:7100/analysis/redback_osg \
   --input-data-types photometry redshift \
-  --optional-params-json '{"source": ["arnett"], "backend": ["redback"], "fix_z": ["True", "False"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:latest", "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu", "docker://nsarinastro/redback-jax"]}'
+  --optional-params-json '{"source": ["arnett", "magnetar", "magnetar_nickel", "shock_cooling"], "backend": ["redback"], "fix_z": ["True", "False"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu", "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:latest", "docker://nsarinastro/redback-jax"], "request_gpus": {"type": "number", "default": 1}, "request_cpus": {"type": "number", "default": 4}, "request_memory": {"type": "number", "default": 24576}}'
 
 # MOSFiT — its own image; set singularity_image to the staged mosfit .sif once the
 # container build (mcoughlin/MOSFiT docker branch) is published to OSDF/CVMFS.

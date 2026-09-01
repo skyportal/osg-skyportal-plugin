@@ -72,14 +72,19 @@ def _band(filt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Model registry. ``model`` is the redback-jax model name for the class-based
-# ``Likelihood`` (the JIT-able fit); ``overlay_builder`` reconstructs the light
-# curve at the medians. ``fit_params`` are sampled; ``fixed`` are held constant
-# (redshift/lum_dist filled from the payload); ``t0_key`` names the epoch param.
+# Model registry. ``model`` is the redback-jax MODEL_REGISTRY name -- a
+# ``*_spectra`` model, so the class-based ``Likelihood`` fits in magnitude space
+# and the overlay reconstructs band mags from the same model. ``fit_params`` are
+# sampled; ``fixed`` are held constant (redshift/lum_dist filled from the
+# payload); ``priors`` are Uniform bounds (t0 is data-anchored); ``t0_key`` names
+# the epoch param. The overlay is built generically from ``model`` (see
+# _build_source), so no per-model builder is needed.
+#
+# Chosen to complement Fiesta (which has no central-engine or shock-cooling
+# models): a millisecond-magnetar engine (SLSN-I), a magnetar+nickel hybrid, and
+# early-time shock cooling of extended material.
 # ---------------------------------------------------------------------------
 def _model_registry() -> dict[str, dict]:
-    from redback_jax.sources import PrecomputedSpectraSource  # lazy
-
     return {
         "arnett": {
             "model": "arnett_spectra",
@@ -92,9 +97,65 @@ def _model_registry() -> dict[str, dict]:
                 "mej": (0.3, 5.0),
                 "vej": (3000.0, 12000.0),
             },
-            # from_arnett_model derives lum_dist from redshift, so no lum_dist here.
-            "overlay_builder": PrecomputedSpectraSource.from_arnett_model,
-            "overlay_fixed": ["temperature_floor", "kappa", "kappa_gamma"],
+        },
+        # p0 = initial spin period (ms), bp = dipole field (1e14 G).
+        "magnetar": {
+            "model": "magnetar_powered_spectra",
+            "t0_key": "t0",
+            "fit_params": ["p0", "bp", "mej", "vej"],
+            "fixed": {
+                "mass_ns": 1.4,
+                "theta_pb": 0.785,
+                "kappa": 0.2,
+                "kappa_gamma": 0.1,
+                "temperature_floor": 5000.0,
+            },
+            "priors": {
+                "t0": None,
+                "p0": (1.0, 10.0),
+                "bp": (0.1, 10.0),
+                "mej": (1.0, 50.0),
+                "vej": (5000.0, 15000.0),
+            },
+        },
+        "magnetar_nickel": {
+            "model": "magnetar_nickel_spectra",
+            "t0_key": "t0",
+            "fit_params": ["f_nickel", "mej", "p0", "bp", "vej"],
+            "fixed": {
+                "mass_ns": 1.4,
+                "theta_pb": 0.785,
+                "kappa": 0.2,
+                "kappa_gamma": 0.1,
+                "temperature_floor": 5000.0,
+            },
+            "priors": {
+                "t0": None,
+                "f_nickel": (0.02, 0.4),
+                "mej": (1.0, 50.0),
+                "p0": (1.0, 10.0),
+                "bp": (0.1, 10.0),
+                "vej": (5000.0, 15000.0),
+            },
+        },
+        # log10 of ejecta mass (Msun), progenitor radius (cm), energy (erg).
+        "shock_cooling": {
+            "model": "shock_cooling_spectra",
+            "t0_key": "t0",
+            "fit_params": ["log10_mass", "log10_radius", "log10_energy", "vej"],
+            "fixed": {
+                "nn": 10.0,
+                "delta": 1.1,
+                "kappa": 0.2,
+                "temperature_floor": 5000.0,
+            },
+            "priors": {
+                "t0": None,
+                "log10_mass": (-2.0, 1.0),
+                "log10_radius": (12.0, 14.0),
+                "log10_energy": (49.0, 51.0),
+                "vej": (5000.0, 15000.0),
+            },
         },
     }
 
@@ -186,6 +247,27 @@ def _prior_bounds(
     return bounds
 
 
+def _build_source(reg: dict, fixed: dict, medians: dict):
+    """Reconstruct the redback-jax spectra source at concrete params. Every
+    ``*_spectra`` model returns (time, lambdas, spectra), so one builder covers
+    the whole registry: the model's own explicit args (redshift, lum_dist, vej,
+    temperature_floor) bind by name and the rest flow through as kwargs."""
+    from redback_jax.models import MODEL_REGISTRY
+    from redback_jax.sources import PrecomputedSpectraSource
+
+    spectra_fn = MODEL_REGISTRY[reg["model"]]
+    model_params = {k: v for k, v in fixed.items() if k not in ("redshift", "lum_dist")}
+    model_params.update({p: float(medians[p]) for p in reg["fit_params"]})
+    out = spectra_fn(redshift=fixed["redshift"], lum_dist=fixed["lum_dist"], **model_params)
+    return PrecomputedSpectraSource(
+        phases=out.time,
+        wavelengths=out.lambdas,
+        flux_grid=out.spectra,
+        name=reg["model"],
+        version="redback_jax",
+    )
+
+
 def _model_lightcurve(source: str, fixed: dict, medians: dict, unique_bands, t_grid_days) -> dict:
     """Per-filter model mags at the posterior medians over ``t_grid_days`` (source
     days from t0), in the overlay shape {filter: [[mjd, med, lo, hi]]}. Medians are
@@ -193,18 +275,19 @@ def _model_lightcurve(source: str, fixed: dict, medians: dict, unique_bands, t_g
     import numpy as np
 
     reg = _model_registry()[source]
-    builder = reg["overlay_builder"]
     t0 = float(medians.get(reg["t0_key"], 0.0))
-    src = builder(
-        redshift=fixed["redshift"],
-        **{k: fixed[k] for k in reg["overlay_fixed"]},
-        **{p: float(medians[p]) for p in reg["fit_params"]},
-    )
+    src = _build_source(reg, fixed, medians)
     mjds = np.asarray(t_grid_days) + t0
     curve: dict[str, list] = {}
     for filt in unique_bands:
         mags = np.asarray(src.bandmag({"amplitude": 1.0}, filt, t_grid_days))
-        curve[filt] = [[float(m), float(mag), float(mag), float(mag)] for m, mag in zip(mjds, mags)]
+        # Drop non-finite points (e.g. epochs before the model's first phase, or
+        # bands outside a model's valid range) so the overlay JSON stays clean.
+        curve[filt] = [
+            [float(m), float(mag), float(mag), float(mag)]
+            for m, mag in zip(mjds, mags)
+            if np.isfinite(mag)
+        ]
     return curve
 
 

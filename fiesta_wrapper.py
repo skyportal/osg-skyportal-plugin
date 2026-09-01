@@ -32,6 +32,26 @@ except ImportError:
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(Path.cwd() / ".jax_cache"))
 
 
+def _limit_cpu_affinity() -> None:
+    """Pin the process to request_cpus cores before JAX loads. JAX/XLA on CPU
+    sizes its threadpool from the process CPU affinity, not request_cpus, so on an
+    OSPool slot it grabs every core and the job is held for CPU overrun. Affinity
+    is the only knob XLA honors here (OMP_/XLA_FLAGS thread limits are ignored).
+    OSG_NUM_CPUS is stamped by the submit side; absent it, leave affinity as-is."""
+    n = os.environ.get("OSG_NUM_CPUS")
+    if not n or not hasattr(os, "sched_setaffinity"):
+        return
+    try:
+        keep = sorted(os.sched_getaffinity(0))[: max(1, int(n))]
+        if keep:
+            os.sched_setaffinity(0, set(keep))
+    except (ValueError, OSError):
+        pass  # non-Linux or affinity not settable -> nothing to cap
+
+
+_limit_cpu_affinity()
+
+
 def load_inputs(path: Path = Path("inputs.json")) -> dict:
     return json.loads(path.read_text())
 

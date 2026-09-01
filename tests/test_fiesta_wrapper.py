@@ -1,6 +1,7 @@
 """Tests for the OSG-side fiesta wrapper. The real fiesta path is gated behind dry_run."""
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,31 @@ import pytest
 
 import fiesta_bridge
 import fiesta_wrapper
+
+
+def test_limit_cpu_affinity_caps_to_request(monkeypatch):
+    """Affinity is pinned to the first OSG_NUM_CPUS of the allowed cores."""
+    captured: dict = {}
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(16)), raising=False)
+    monkeypatch.setattr(
+        os, "sched_setaffinity", lambda pid, s: captured.__setitem__("cores", set(s)), raising=False
+    )
+    monkeypatch.setenv("OSG_NUM_CPUS", "4")
+    fiesta_wrapper._limit_cpu_affinity()
+    assert captured["cores"] == {0, 1, 2, 3}
+
+
+def test_limit_cpu_affinity_noop_without_env(monkeypatch):
+    """No OSG_NUM_CPUS -> affinity is left untouched."""
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(16)), raising=False)
+    monkeypatch.setattr(
+        os,
+        "sched_setaffinity",
+        lambda pid, s: pytest.fail("should not set affinity"),
+        raising=False,
+    )
+    monkeypatch.delenv("OSG_NUM_CPUS", raising=False)
+    fiesta_wrapper._limit_cpu_affinity()
 
 
 def test_run_fit_dry_run_returns_stub():
