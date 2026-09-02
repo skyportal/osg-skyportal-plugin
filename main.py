@@ -328,6 +328,12 @@ def _apply_gpu_and_image(submit_desc: dict, params: dict, defaults: dict) -> Non
         gpu_req = params.get("gpu_requirements", defaults.get("gpu_requirements", ""))
         if gpu_req:
             submit_desc["requirements"] += f" && {gpu_req}"
+        # Per-GPU property constraint (HTCondor require_gpus). Skips nodes whose
+        # driver is too old for the CUDA-12 jax wheels — they assign a GPU but
+        # fail CUDA init. "" disables it.
+        require = params.get("require_gpus", defaults.get("require_gpus", ""))
+        if require:
+            submit_desc["require_gpus"] = require
 
 
 def submit_job(

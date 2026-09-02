@@ -239,6 +239,24 @@ def test_gpu_params_route_to_gpu_image_and_slots(plugin_cfg, last_submit_desc):
     assert "GPUs_GlobalMemoryMb >= 8000" in last_submit_desc["requirements"]
 
 
+def test_require_gpus_constraint_applied(plugin_cfg, last_submit_desc):
+    """require_gpus (driver-version pin) is stamped for GPU jobs."""
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="redback_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={
+            "analysis_parameters": {
+                "request_gpus": 1,
+                "require_gpus": "DriverVersion >= 12.0",
+            }
+        },
+    )
+    assert last_submit_desc["require_gpus"] == "DriverVersion >= 12.0"
+
+
 def test_no_gpu_params_stays_cpu_only(plugin_cfg, last_submit_desc):
     main.submit_job(
         plugin_cfg,
@@ -249,6 +267,7 @@ def test_no_gpu_params_stays_cpu_only(plugin_cfg, last_submit_desc):
         inputs={},
     )
     assert "request_gpus" not in last_submit_desc
+    assert "require_gpus" not in last_submit_desc
 
 
 def test_rehydrate_picks_up_jobs_from_schedd(plugin_cfg, fake_queue):
