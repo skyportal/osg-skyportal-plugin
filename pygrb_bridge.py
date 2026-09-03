@@ -63,6 +63,49 @@ def _params(payload: dict) -> dict:
     return {**DEFAULTS, **(payload.get("analysis_parameters") or {})}
 
 
+# Chirp-mass priors by inferred merger type (a KN implies a compact-object merger).
+# A coarse but honest KN->bank coupling; a full ejecta -> component-mass relation is
+# EOS-dependent and left as a modeling choice.
+_MERGER_CHIRP_MASS = {"BNS": (1.0, 1.6), "NSBH": (1.5, 4.5)}
+
+
+def pygrb_params_from_kn_fit(
+    kn_result: dict,
+    *,
+    ra: float,
+    dec: float,
+    detectors=None,
+    event_name=None,
+    merger_type: str = "BNS",
+    t0_key: str = "t0",
+) -> dict:
+    """Build pygrb ``analysis_parameters`` from a KN light-curve fit result, closing
+    the KN->GW loop: the fit's epoch drives the search window (deck Test 3) and the
+    inferred merger type drives a KN-constrained chirp-mass bank (deck Test 2).
+
+    Fitter-agnostic: a fitted merger-time posterior (e.g. redback's ``t0`` samples,
+    MJD) becomes ``t0_samples`` (window from its spread); otherwise a point epoch
+    (e.g. fiesta's ``trigger_time``, MJD) becomes a fixed ``trigger_time``."""
+    params: dict[str, Any] = {"backend": "pygrb", "ra": float(ra), "dec": float(dec)}
+    if detectors:
+        params["detectors"] = list(detectors)
+    if event_name:
+        params["event_name"] = event_name
+
+    post = kn_result.get("posterior_samples") or {}
+    if t0_key in post and post[t0_key]:
+        params["t0_samples"] = [float(x) for x in post[t0_key]]  # MJD
+        params["time_format"] = "mjd"
+    elif kn_result.get("trigger_time") is not None:
+        params["trigger_time"] = float(kn_result["trigger_time"])
+        params["time_format"] = "mjd"
+
+    cmr = _MERGER_CHIRP_MASS.get(str(merger_type).upper())
+    if cmr:
+        params["chirp_mass_range"] = list(cmr)
+    return params
+
+
 def _truthy(v: Any) -> bool:
     return v is True or str(v).strip().lower() in ("true", "t", "1", "yes")
 
