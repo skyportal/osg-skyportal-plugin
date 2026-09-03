@@ -25,13 +25,14 @@ python register_analysis_service.py \
   --input-data-types photometry redshift \
   --optional-params-json '{"source": ["arnett", "magnetar", "magnetar_nickel", "shock_cooling"], "backend": ["redback"], "fix_z": ["True", "False"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu", "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:latest", "docker://nsarinastro/redback-jax"], "request_gpus": {"type": "number", "default": 1}, "request_cpus": {"type": "number", "default": 4}, "request_memory": {"type": "number", "default": 24576}}'
 
-# MOSFiT — its own image; set singularity_image to the staged mosfit .sif once the
-# container build (mcoughlin/MOSFiT docker branch) is published to OSDF/CVMFS.
+# MOSFiT — its own image (ashleyvillar/mosfit, built from the MOSFiT docker
+# branch: mosfit + CPU torch + baked ZTF filters). docker:// works per-job now;
+# prefer the CVMFS mirror once ashleyvillar/mosfit is added to the OSG sync list.
 python register_analysis_service.py \
   --name MOSFiT_OSG --display "MOSFiT (OSG)" \
   --listener-url http://localhost:7100/analysis/mosfit_osg \
   --input-data-types photometry redshift \
-  --optional-params-json '{"source": ["default", "slsn", "magnetar", "csm", "csmni", "ia", "tde", "kilonova", "nsbh", "bns"], "wrapper": ["mosfit"], "singularity_image": ["REPLACE_WITH_MOSFIT_SIF"], "fix_z": ["True", "False"]}'
+  --optional-params-json '{"source": ["default", "slsn", "magnetar", "csm", "csmni", "ia", "tde", "kilonova", "nsbh", "bns"], "wrapper": ["mosfit"], "singularity_image": ["docker://ashleyvillar/mosfit", "/cvmfs/singularity.opensciencegrid.org/ashleyvillar/mosfit:latest"], "fix_z": ["True", "False"]}'
 
 # Already registered (kept here for reference / re-registration):
 #   Fiesta_OSG      -> backend fiesta, /analysis/fiesta_osg
