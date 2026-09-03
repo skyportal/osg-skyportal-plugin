@@ -233,7 +233,7 @@ def _stage_wrapper_job(
     # wraps), named explicitly with the `wrapper` param, or requested per-job
     # via `use_wrapper`. A named wrapper implies wrapper mode.
     wrapper = str(params.get("wrapper", "")).strip().lower()
-    use_wrapper = wrapper in ("fiesta", "periodfind", "mosfit") or params.get(
+    use_wrapper = wrapper in ("fiesta", "periodfind", "mosfit", "pygrb") or params.get(
         "use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False)
     )
     if not use_wrapper:
@@ -260,6 +260,12 @@ def _stage_wrapper_job(
         wrapper_files = [
             (plugin_dir / "mosfit_wrapper.py").resolve(),
             (plugin_dir / "mosfit_bridge.py").resolve(),
+        ]
+    elif wrapper == "pygrb":
+        wrapper_name = "pygrb_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "pygrb_wrapper.py").resolve(),
+            (plugin_dir / "pygrb_bridge.py").resolve(),
         ]
     else:
         wrapper_name = "fiesta_wrapper.py"
@@ -294,7 +300,7 @@ def _stage_wrapper_job(
     # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under
     # its basename; populate it out-of-band.
     jax_cache_dir = cfg.get("jax_cache_dir")
-    if wrapper not in ("periodfind", "mosfit") and jax_cache_dir:
+    if wrapper not in ("periodfind", "mosfit", "pygrb") and jax_cache_dir:
         cache_path = Path(jax_cache_dir).resolve()
         if cache_path.is_dir() and any(cache_path.iterdir()):
             transfer.append(str(cache_path))
@@ -303,7 +309,9 @@ def _stage_wrapper_job(
     overrides = {
         # env resolves python3 via PATH, so any image layout works.
         "executable": "/usr/bin/env",
-        "arguments": f"python3 {wrapper_name}",
+        # pycbc's image ships pycbc under `python` (3.11); its `python3` is EL8's
+        # 3.6. Other images use python3. env resolves the name on PATH.
+        "arguments": f"{'python' if wrapper == 'pygrb' else 'python3'} {wrapper_name}",
         "transfer_input_files": ",".join(transfer),
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
@@ -463,6 +471,9 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     elif wrapper == "mosfit":
         wrapper_name = "mosfit_wrapper.py"
         wrapper_files = [plugin_dir / "mosfit_wrapper.py", plugin_dir / "mosfit_bridge.py"]
+    elif wrapper == "pygrb":
+        wrapper_name = "pygrb_wrapper.py"
+        wrapper_files = [plugin_dir / "pygrb_wrapper.py", plugin_dir / "pygrb_bridge.py"]
     else:
         wrapper_name = "fiesta_wrapper.py"
         wrapper_files = [
@@ -474,7 +485,9 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     submit_desc: dict[str, str] = {
         # env resolves python3 via PATH, so any image layout works.
         "executable": "/usr/bin/env",
-        "arguments": f"python3 {wrapper_name}",
+        # pycbc's image ships pycbc under `python` (3.11); its `python3` is EL8's
+        # 3.6. Other images use python3. env resolves the name on PATH.
+        "arguments": f"{'python' if wrapper == 'pygrb' else 'python3'} {wrapper_name}",
         "transfer_executable": "False",
         "should_transfer_files": "YES",
         "when_to_transfer_output": "ON_EXIT",
@@ -980,6 +993,8 @@ class AnalysisHandler(tornado.web.RequestHandler):
                     params.setdefault("wrapper", "mosfit")
                 elif "periodfind" in name:
                     params.setdefault("wrapper", "periodfind")
+                elif "pygrb" in name:
+                    params.setdefault("wrapper", "pygrb")
                 elif "redback" in name:
                     params.setdefault("backend", "redback")
 
