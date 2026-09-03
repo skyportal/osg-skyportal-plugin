@@ -54,6 +54,9 @@ DEFAULTS: dict[str, Any] = {
     # Glitch gating: list of {ifo?, gps, window, taper} to zero out (tapered) loud
     # transients before PSD/matched-filter -- e.g. the GW170817 L1 glitch.
     "gates": None,
+    # Coherent-SNR threshold for the trigger-distribution plot (clustered local
+    # maxima above this are shown as the background scatter).
+    "trigger_threshold": 4.5,
 }
 
 _VALID_DETECTORS = {"H1", "L1", "V1", "K1", "G1"}
@@ -382,7 +385,8 @@ def _coherent_search(
     # Recompute the winning template's per-detector numbers for the report.
     win_snr, win_sig = _template_series(best_m1, best_m2)
 
-    plot_file = _plot(outdir, times, best_coh, trigger_gps, coherent_snr, best_gps)
+    trig_t, trig_s = _extract_triggers(times, best_coh, srate, float(params["trigger_threshold"]))
+    plot_file = _plot(outdir, trig_t, trig_s, trigger_gps, coherent_snr, best_gps)
     return {
         "coherent_snr": coherent_snr,
         "network_snr": float(best_net[ipk]),
@@ -390,6 +394,7 @@ def _coherent_search(
         "trigger_gps": trigger_gps,
         "detectors": dets,
         "n_templates": len(bank),
+        "n_triggers": int(len(trig_t)),
         "best_template": {"mass1": float(best_m1), "mass2": float(best_m2)},
         "single_detector_peaks": {i: float(abs(win_snr[i]).numpy().max()) for i in dets},
         "sigma": {i: win_sig[i] for i in dets},
@@ -397,26 +402,56 @@ def _coherent_search(
     }
 
 
-def _plot(outdir, times, net, trigger_gps, coherent_snr, best_gps) -> str:
-    """Coherent-SNR-vs-time around the trigger, in the deck's style."""
+def _extract_triggers(times, coh, srate, threshold, cluster_s=0.1, max_n=4000):
+    """Clustered local maxima of the coherent SNR above ``threshold`` -> a trigger
+    distribution (one point per ~cluster_s), capped to the loudest ``max_n``. This
+    turns the continuous SNR series into the discrete trigger scatter PyGRB plots
+    (the background at low SNR + any loud on-source candidate)."""
+    import numpy as np
+
+    try:
+        from scipy.signal import find_peaks
+
+        pk, _ = find_peaks(coh, height=threshold, distance=max(1, int(cluster_s * srate)))
+    except Exception:  # noqa: BLE001 — no scipy: fall back to a plain threshold
+        pk = np.where(coh >= threshold)[0]
+    tt, ss = times[pk], coh[pk]
+    if len(ss) > max_n:  # keep the loudest
+        keep = np.argsort(ss)[-max_n:]
+        tt, ss = tt[keep], ss[keep]
+    order = np.argsort(tt)
+    return tt[order], ss[order]
+
+
+def _plot(outdir, trig_times, trig_snrs, trigger_gps, coherent_snr, best_gps) -> str:
+    """Trigger distribution (coherent SNR vs t-T0), in the deck's style: the
+    clustered triggers as a background scatter, the loudest starred, T0 marked."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(times - trigger_gps, net, ".", ms=3, color="tab:blue", label="Coherent SNR")
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.plot(
+        trig_times - trigger_gps,
+        trig_snrs,
+        ".",
+        ms=3,
+        color="tab:blue",
+        alpha=0.5,
+        label=f"Triggers ({len(trig_times)})",
+    )
     ax.axvline(0.0, ls="--", color="green", label="Trigger time (T0)")
     ax.plot(
         best_gps - trigger_gps,
         coherent_snr,
         "*",
-        ms=16,
+        ms=18,
         color="red",
         label=f"Best candidate (SNR={coherent_snr:.2f})",
     )
     ax.set_xlabel("t - T0 [s]")
-    ax.set_ylabel("Coherent (network) SNR")
+    ax.set_ylabel("Coherent SNR")
     ax.set_title("Targeted-search trigger distribution")
     ax.legend(loc="upper right")
     fig.tight_layout()
@@ -471,6 +506,7 @@ def run_from_skyportal_inputs(
         "t0_info": t0_info,
         "detectors": dets,
         "n_templates": result["n_templates"],
+        "n_triggers": result["n_triggers"],
         "best_template": result["best_template"],
         "single_detector_peaks": result["single_detector_peaks"],
         "sigma": result["sigma"],
