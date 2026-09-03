@@ -178,68 +178,43 @@ def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, event_na
     return ts
 
 
-def _coherent_search(
-    payload: dict,
-    params: dict,
-    trigger_gps: float,
-    dets: list,
-    onsource_window: float,
-    outdir: Path,
-) -> dict:
-    """Dominant-polarization coherent SNR over the on-source window.
-
-    Per detector: matched-filter SNR rho_d(t), template sensitivity sigma_d, and
-    antenna response (F+, Fx) at the sky position. The sigma-weighted responses are
-    rotated to the dominant polarization (cross term -> 0); the time-shifted
-    (geocenter-aligned) matched-filter outputs are projected onto the two GW
-    polarizations and combined. This is the coherent statistic PyGRB uses -- here
-    in single-template form; the template bank + full stat is Phase 2's
-    pycbc_multi_inspiral. The plain network SNR (quadrature sum) is reported too."""
+def _build_bank(params: dict) -> list:
+    """Templates to search (a KN-constrained bank, deck Test 2). Options, in order:
+    ``bank`` (explicit [[m1,m2],...]); ``chirp_mass_range`` (equal-mass templates
+    finely gridded in chirp mass -- the right variable for BNS, since SNR is very
+    sensitive to it); ``mass1_range``/``mass2_range`` (component-mass grid). Gridded
+    to ``bank_n`` points. Default is the single (mass1, mass2)."""
     import numpy as np
-    from pycbc.detector import Detector
-    from pycbc.filter import matched_filter, sigma
-    from pycbc.psd import interpolate, inverse_spectrum_truncation
-    from pycbc.waveform import get_fd_waveform
 
-    ra, dec = _resolve_sky(payload, params)
-    srate = int(params["sample_rate"])
-    f_low = float(params["f_lower"])
-    win = float(onsource_window)
-    pad = float(params["pad_seconds"])
-    seg = float(params["psd_seconds"])
-    # Margin so the geocenter time-shift (<= Earth light-crossing ~0.043 s) stays
-    # inside the cropped SNR series at the window edges.
-    edge = 1.0
-    start = trigger_gps - seg - win - pad
-    end = trigger_gps + win + pad + edge
+    bank = params.get("bank")
+    if bank:
+        return [(float(a), float(b)) for a, b in bank]
+    cmr = params.get("chirp_mass_range")
+    if cmr:
+        nb = int(params.get("bank_n", 20))
+        # equal-mass template for chirp mass Mc has component mass Mc * 2**(1/5).
+        return [
+            (float(mc * 2**0.2), float(mc * 2**0.2))
+            for mc in np.linspace(float(cmr[0]), float(cmr[1]), nb)
+        ]
+    m1r, m2r = params.get("mass1_range"), params.get("mass2_range")
+    if m1r and m2r:
+        nb = int(params.get("bank_n", 5))
+        return [
+            (float(a), float(b))
+            for a in np.linspace(float(m1r[0]), float(m1r[1]), nb)
+            for b in np.linspace(float(m2r[0]), float(m2r[1]), nb)
+        ]
+    return [(float(params["mass1"]), float(params["mass2"]))]
 
-    snr_series, sig, fp, fc, dt = {}, {}, {}, {}, {}
-    event_name = params.get("event_name")
-    for ifo in dets:
-        data = _fetch_strain(ifo, start, end, srate, event_name)
-        data = data.highpass_fir(f_low, 512)
-        data = _apply_gates(data, ifo, params.get("gates"))
-        psd = interpolate(data.psd(4), data.delta_f)
-        psd = inverse_spectrum_truncation(
-            psd, int(4 * data.sample_rate), low_frequency_cutoff=f_low
-        )
-        hp, _ = get_fd_waveform(
-            approximant=params["approximant"],
-            mass1=float(params["mass1"]),
-            mass2=float(params["mass2"]),
-            f_lower=f_low,
-            delta_f=data.delta_f,
-        )
-        hp.resize(len(psd))
-        snr = matched_filter(hp, data, psd=psd, low_frequency_cutoff=f_low)
-        snr_series[ifo] = snr.crop(seg // 2, pad)  # drop PSD-corrupted edges
-        sig[ifo] = float(sigma(hp, psd=psd, low_frequency_cutoff=f_low))
-        d = Detector(ifo)
-        fp[ifo], fc[ifo] = d.antenna_pattern(ra, dec, 0.0, trigger_gps)
-        dt[ifo] = d.time_delay_from_earth_center(ra, dec, trigger_gps)
 
-    # Rotate the sigma-weighted antenna responses to the dominant polarization,
-    # where the + and x network sums decouple.
+def _coherent_series(snr_series, sig, fp, fc, dt, dets, trigger_gps, win, srate, n):
+    """Dominant-polarization coherent SNR + network SNR over the on-source grid,
+    for one template's per-detector matched-filter outputs. Rotates the sigma-
+    weighted antenna responses so the two GW polarizations decouple, then projects
+    the time-shifted (geocenter-aligned) outputs onto each and combines."""
+    import numpy as np
+
     wp = np.array([sig[i] * fp[i] for i in dets])
     wc = np.array([sig[i] * fc[i] for i in dets])
     two_psi = 0.5 * np.arctan2(2.0 * np.sum(wp * wc), np.sum(wp * wp - wc * wc))
@@ -248,10 +223,6 @@ def _coherent_search(
     ac = -wp * sin2 + wc * cos2
     a_p, a_c = float(np.sum(ap * ap)), float(np.sum(ac * ac))
 
-    # Project the time-shifted complex matched-filter outputs onto each polarization
-    # (vectorized index-shift so wide T0-driven windows stay fast).
-    n = int(round(2.0 * win * srate))
-    times = (trigger_gps - win) + np.arange(n) / srate
     sum_p = np.zeros(n, dtype=complex)
     sum_c = np.zeros(n, dtype=complex)
     net_sq = np.zeros(n)
@@ -272,21 +243,113 @@ def _coherent_search(
         coh_sq += np.abs(sum_p) ** 2 / a_p
     if a_c > 1e-6:
         coh_sq += np.abs(sum_c) ** 2 / a_c
-    coh = np.sqrt(coh_sq)
+    return np.sqrt(coh_sq), np.sqrt(net_sq)
 
-    ipk = int(np.argmax(coh))
-    coherent_snr = float(coh[ipk])
+
+def _coherent_search(
+    payload: dict,
+    params: dict,
+    trigger_gps: float,
+    dets: list,
+    onsource_window: float,
+    outdir: Path,
+) -> dict:
+    """Dominant-polarization coherent search over the on-source window, optionally
+    over a (KN-constrained) template bank. Conditions each detector's data once,
+    then for each template matched-filters and coherently combines; the per-time
+    max over the bank is the search statistic. This is the coherent search PyGRB
+    runs -- the full stat/bank live in Phase 2's pycbc_multi_inspiral."""
+    import numpy as np
+    from pycbc.detector import Detector
+    from pycbc.filter import matched_filter, sigma
+    from pycbc.psd import interpolate, inverse_spectrum_truncation
+    from pycbc.waveform import get_fd_waveform
+
+    ra, dec = _resolve_sky(payload, params)
+    srate = int(params["sample_rate"])
+    f_low = float(params["f_lower"])
+    win = float(onsource_window)
+    pad = float(params["pad_seconds"])
+    seg = float(params["psd_seconds"])
+    # Margin so the geocenter time-shift (<= Earth light-crossing ~0.043 s) stays
+    # inside the cropped SNR series at the window edges.
+    edge = 1.0
+    start = trigger_gps - seg - win - pad
+    end = trigger_gps + win + pad + edge
+
+    # Condition each detector's data once; every template reuses it.
+    cond = {}
+    event_name = params.get("event_name")
+    for ifo in dets:
+        data = _fetch_strain(ifo, start, end, srate, event_name)
+        data = data.highpass_fir(f_low, 512)
+        data = _apply_gates(data, ifo, params.get("gates"))
+        psd = interpolate(data.psd(4), data.delta_f)
+        psd = inverse_spectrum_truncation(
+            psd, int(4 * data.sample_rate), low_frequency_cutoff=f_low
+        )
+        d = Detector(ifo)
+        cond[ifo] = {
+            "data": data,
+            "psd": psd,
+            "fp": d.antenna_pattern(ra, dec, 0.0, trigger_gps)[0],
+            "fc": d.antenna_pattern(ra, dec, 0.0, trigger_gps)[1],
+            "dt": d.time_delay_from_earth_center(ra, dec, trigger_gps),
+        }
+
+    def _template_series(m1, m2):
+        """Per-detector matched-filter SNR + sigma for one (m1, m2) template."""
+        snr_series, sig = {}, {}
+        for ifo in dets:
+            c = cond[ifo]
+            hp, _ = get_fd_waveform(
+                approximant=params["approximant"],
+                mass1=m1,
+                mass2=m2,
+                f_lower=f_low,
+                delta_f=c["data"].delta_f,
+            )
+            hp.resize(len(c["psd"]))
+            snr = matched_filter(hp, c["data"], psd=c["psd"], low_frequency_cutoff=f_low)
+            snr_series[ifo] = snr.crop(seg // 2, pad)
+            sig[ifo] = float(sigma(hp, psd=c["psd"], low_frequency_cutoff=f_low))
+        return snr_series, sig
+
+    bank = _build_bank(params)
+    fp = {i: cond[i]["fp"] for i in dets}
+    fc = {i: cond[i]["fc"] for i in dets}
+    dt = {i: cond[i]["dt"] for i in dets}
+    n = int(round(2.0 * win * srate))
+    times = (trigger_gps - win) + np.arange(n) / srate
+    best_coh, best_net = np.zeros(n), np.zeros(n)
+    best_idx = np.full(n, 0)
+    for ti, (m1, m2) in enumerate(bank):
+        snr_series, sig = _template_series(m1, m2)
+        coh, net = _coherent_series(snr_series, sig, fp, fc, dt, dets, trigger_gps, win, srate, n)
+        mask = coh > best_coh
+        best_coh[mask] = coh[mask]
+        best_net[mask] = net[mask]
+        best_idx[mask] = ti
+
+    ipk = int(np.argmax(best_coh))
+    coherent_snr = float(best_coh[ipk])
     best_gps = float(times[ipk])
+    best_m1, best_m2 = bank[int(best_idx[ipk])]
 
-    plot_file = _plot(outdir, times, coh, trigger_gps, coherent_snr, best_gps)
+    # Recompute the winning template's per-detector numbers for the report.
+    win_snr, win_sig = _template_series(best_m1, best_m2)
+
+    plot_file = _plot(outdir, times, best_coh, trigger_gps, coherent_snr, best_gps)
     return {
         "coherent_snr": coherent_snr,
-        "network_snr": float(np.sqrt(net_sq)[ipk]),
+        "network_snr": float(best_net[ipk]),
         "best_gps": best_gps,
         "trigger_gps": trigger_gps,
         "detectors": dets,
-        "single_detector_peaks": {i: float(abs(snr_series[i]).numpy().max()) for i in dets},
-        "sigma": {i: sig[i] for i in dets},
+        "n_templates": len(bank),
+        "best_template": {"mass1": float(best_m1), "mass2": float(best_m2)},
+        "single_detector_peaks": {i: float(abs(win_snr[i]).numpy().max()) for i in dets},
+        "sigma": {i: win_sig[i] for i in dets},
         "plot_file": plot_file,
     }
 
@@ -364,10 +427,10 @@ def run_from_skyportal_inputs(
         "onsource_window": window,
         "t0_info": t0_info,
         "detectors": dets,
+        "n_templates": result["n_templates"],
+        "best_template": result["best_template"],
         "single_detector_peaks": result["single_detector_peaks"],
         "sigma": result["sigma"],
-        "mass1": float(params["mass1"]),
-        "mass2": float(params["mass2"]),
         "f_lower": float(params["f_lower"]),
     }
     result_file = outdir / "pygrb_result.json"
