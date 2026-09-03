@@ -55,6 +55,18 @@ services:
                     # supporting CUDA 12; older-driver nodes assign a GPU but fail
                     # CUDA init. "" disables. Clear this if GPU jobs stop matching.
                     require_gpus: "DriverVersion >= 12.0"
+                    # IGWN access-point knobs (all "" = plain OSPool submission).
+                    # Set these to submit to an IGWN-credentialed AP (e.g. AP42)
+                    # instead of ap41, so the AP mints + delivers an IGWN-scoped
+                    # scitoken to the job (read:/frames, gwdatafind.read) for
+                    # non-public strain — no interactive OIDC/MFA on this submitter.
+                    # Pair with htcondor.collector/schedd pointed at that AP and an
+                    # AP-issued IDTOKEN at htcondor.scitoken_path. Validated on
+                    # condor-f3; see docs/deploy-igwn.md.
+                    use_oauth_services: ""      # e.g. "scitokens"
+                    accounting_group: ""        # e.g. "ligo.dev.o4.burst.allsky.stamp"
+                    accounting_group_user: ""   # e.g. "michael.coughlin" (the AP user)
+                    pools: ""                   # e.g. "IGWN,CIT"
                 poller:
                     # Seconds between condor_q sweeps. Bursty workloads → drop to 10-30.
                     interval_seconds: 60

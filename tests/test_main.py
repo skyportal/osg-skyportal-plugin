@@ -270,6 +270,43 @@ def test_no_gpu_params_stays_cpu_only(plugin_cfg, last_submit_desc):
     assert "require_gpus" not in last_submit_desc
 
 
+def test_igwn_ap_knobs_applied(plugin_cfg, last_submit_desc):
+    """IGWN AP knobs (use_oauth_services / accounting_group / pools) are stamped
+    onto the submit desc for submission to an IGWN-credentialed AP."""
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={
+            "analysis_parameters": {
+                "use_oauth_services": "scitokens",
+                "accounting_group": "ligo.dev.o4.burst.allsky.stamp",
+                "accounting_group_user": "michael.coughlin",
+                "pools": "IGWN,CIT",
+            }
+        },
+    )
+    assert last_submit_desc["use_oauth_services"] == "scitokens"
+    assert last_submit_desc["accounting_group"] == "ligo.dev.o4.burst.allsky.stamp"
+    assert last_submit_desc["accounting_group_user"] == "michael.coughlin"
+    assert last_submit_desc["+POOLS"] == '"IGWN,CIT"'
+
+
+def test_no_igwn_knobs_by_default(plugin_cfg, last_submit_desc):
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={},
+    )
+    for k in ("use_oauth_services", "accounting_group", "+POOLS"):
+        assert k not in last_submit_desc
+
+
 def test_rehydrate_picks_up_jobs_from_schedd(plugin_cfg, fake_queue):
     # Simulate a restart: pre-populate the schedd as if jobs are still running.
     fake_queue.append(

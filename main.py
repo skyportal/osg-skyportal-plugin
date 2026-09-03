@@ -344,6 +344,28 @@ def _apply_gpu_and_image(submit_desc: dict, params: dict, defaults: dict) -> Non
             submit_desc["require_gpus"] = require
 
 
+def _apply_igwn_ap(submit_desc: dict, params: dict, defaults: dict) -> None:
+    """Stamp IGWN access-point knobs onto a submit desc when configured. For
+    submission to an IGWN-credentialed AP (e.g. AP42/condor-f3) instead of OSPool:
+      - use_oauth_services: the AP mints + delivers an IGWN-scoped scitoken to the
+        job (read:/frames, gwdatafind.read, ...) for non-public strain access;
+      - accounting_group[/_user]: satisfies the AP's LigoSearchTag requirement;
+      - pools: routes to the IGWN/CIT pools (replaces deprecated flock_local).
+    All default "" = off (plain OSPool submission)."""
+    oauth = params.get("use_oauth_services", defaults.get("use_oauth_services", ""))
+    if oauth:
+        submit_desc["use_oauth_services"] = str(oauth)
+    acct = params.get("accounting_group", defaults.get("accounting_group", ""))
+    if acct:
+        submit_desc["accounting_group"] = str(acct)
+        user = params.get("accounting_group_user", defaults.get("accounting_group_user", ""))
+        if user:
+            submit_desc["accounting_group_user"] = str(user)
+    pools = params.get("pools", defaults.get("pools", ""))
+    if pools:
+        submit_desc["+POOLS"] = f'"{pools}"'
+
+
 def submit_job(
     cfg: dict,
     analysis_name: str,
@@ -398,6 +420,7 @@ def submit_job(
         int(params.get("max_runtime_seconds", defaults["max_runtime_seconds"]))
     )
     _apply_gpu_and_image(submit_desc, params, defaults)
+    _apply_igwn_ap(submit_desc, params, defaults)
     submit_desc.update(wrapper_overrides)
     # Round-trip the SkyPortal binding through the schedd so we can rehydrate after restart.
     submit_desc["+SkyPortalAnalysisName"] = f'"{analysis_name}"'
@@ -510,6 +533,7 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     if cpu_req:
         submit_desc["requirements"] += f" && {cpu_req}"
     _apply_gpu_and_image(submit_desc, p0, defaults)
+    _apply_igwn_ap(submit_desc, p0, defaults)
     env_parts = []
     env_parts.append(f"OSG_NUM_CPUS={p0.get('request_cpus', defaults['request_cpus'])}")
     if out_prefix:
