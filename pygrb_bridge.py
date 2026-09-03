@@ -178,7 +178,7 @@ def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, event_na
     return ts
 
 
-def _search_network_snr(
+def _coherent_search(
     payload: dict,
     params: dict,
     trigger_gps: float,
@@ -186,13 +186,18 @@ def _search_network_snr(
     onsource_window: float,
     outdir: Path,
 ) -> dict:
-    """Per-detector matched filter + sky-consistent (geocenter-aligned) network
-    SNR around the trigger. A prototype of the PyGRB coherent statistic; the
-    production statistic (dominant-polarization projection) comes from
-    pycbc_multi_inspiral in Phase 2."""
+    """Dominant-polarization coherent SNR over the on-source window.
+
+    Per detector: matched-filter SNR rho_d(t), template sensitivity sigma_d, and
+    antenna response (F+, Fx) at the sky position. The sigma-weighted responses are
+    rotated to the dominant polarization (cross term -> 0); the time-shifted
+    (geocenter-aligned) matched-filter outputs are projected onto the two GW
+    polarizations and combined. This is the coherent statistic PyGRB uses -- here
+    in single-template form; the template bank + full stat is Phase 2's
+    pycbc_multi_inspiral. The plain network SNR (quadrature sum) is reported too."""
     import numpy as np
     from pycbc.detector import Detector
-    from pycbc.filter import matched_filter
+    from pycbc.filter import matched_filter, sigma
     from pycbc.psd import interpolate, inverse_spectrum_truncation
     from pycbc.waveform import get_fd_waveform
 
@@ -208,8 +213,7 @@ def _search_network_snr(
     start = trigger_gps - seg - win - pad
     end = trigger_gps + win + pad + edge
 
-    per_det = {}
-    snr_series = {}
+    snr_series, sig, fp, fc, dt = {}, {}, {}, {}, {}
     event_name = params.get("event_name")
     for ifo in dets:
         data = _fetch_strain(ifo, start, end, srate, event_name)
@@ -228,41 +232,61 @@ def _search_network_snr(
         )
         hp.resize(len(psd))
         snr = matched_filter(hp, data, psd=psd, low_frequency_cutoff=f_low)
-        snr = snr.crop(seg // 2, pad)  # drop PSD-corrupted edges
-        snr_series[ifo] = snr
-        # Shift each detector's SNR to the geocenter for this sky position, so the
-        # network sum is coherent in time-of-arrival.
-        dt = Detector(ifo).time_delay_from_earth_center(ra, dec, trigger_gps)
-        per_det[ifo] = {"dt": dt, "peak": float(abs(snr).numpy().max())}
+        snr_series[ifo] = snr.crop(seg // 2, pad)  # drop PSD-corrupted edges
+        sig[ifo] = float(sigma(hp, psd=psd, low_frequency_cutoff=f_low))
+        d = Detector(ifo)
+        fp[ifo], fc[ifo] = d.antenna_pattern(ra, dec, 0.0, trigger_gps)
+        dt[ifo] = d.time_delay_from_earth_center(ra, dec, trigger_gps)
 
-    # Common geocenter grid over the on-source window; sum |rho|^2 across dets.
-    # Vectorized (index-shift each series by its geocenter delay) so wide,
-    # T0-posterior-driven windows stay fast; edge-guarded against short slices.
+    # Rotate the sigma-weighted antenna responses to the dominant polarization,
+    # where the + and x network sums decouple.
+    wp = np.array([sig[i] * fp[i] for i in dets])
+    wc = np.array([sig[i] * fc[i] for i in dets])
+    two_psi = 0.5 * np.arctan2(2.0 * np.sum(wp * wc), np.sum(wp * wp - wc * wc))
+    cos2, sin2 = np.cos(two_psi), np.sin(two_psi)
+    ap = wp * cos2 + wc * sin2
+    ac = -wp * sin2 + wc * cos2
+    a_p, a_c = float(np.sum(ap * ap)), float(np.sum(ac * ac))
+
+    # Project the time-shifted complex matched-filter outputs onto each polarization
+    # (vectorized index-shift so wide T0-driven windows stay fast).
     n = int(round(2.0 * win * srate))
     times = (trigger_gps - win) + np.arange(n) / srate
+    sum_p = np.zeros(n, dtype=complex)
+    sum_c = np.zeros(n, dtype=complex)
     net_sq = np.zeros(n)
-    for ifo in dets:
-        snr = snr_series[ifo]
-        arr = abs(snr.numpy())
-        i0 = int(
-            round((trigger_gps - win + per_det[ifo]["dt"] - float(snr.start_time)) / snr.delta_t)
-        )
+    for k, ifo in enumerate(dets):
+        s = snr_series[ifo]
+        arr = s.numpy()  # complex SNR
+        i0 = int(round((trigger_gps - win + dt[ifo] - float(s.start_time)) / s.delta_t))
+        z = np.zeros(n, dtype=complex)
         a = max(0, -i0)
         b = min(n, len(arr) - i0)
         if b > a:
-            net_sq[a:b] += arr[i0 + a : i0 + b] ** 2
-    net = np.sqrt(net_sq)
-    ipk = int(np.argmax(net))
-    coherent_snr = float(net[ipk])
+            z[a:b] = arr[i0 + a : i0 + b]
+        sum_p += ap[k] * z
+        sum_c += ac[k] * z
+        net_sq += np.abs(z) ** 2
+    coh_sq = np.zeros(n)
+    if a_p > 1e-6:
+        coh_sq += np.abs(sum_p) ** 2 / a_p
+    if a_c > 1e-6:
+        coh_sq += np.abs(sum_c) ** 2 / a_c
+    coh = np.sqrt(coh_sq)
+
+    ipk = int(np.argmax(coh))
+    coherent_snr = float(coh[ipk])
     best_gps = float(times[ipk])
 
-    plot_file = _plot(outdir, times, net, trigger_gps, coherent_snr, best_gps)
+    plot_file = _plot(outdir, times, coh, trigger_gps, coherent_snr, best_gps)
     return {
         "coherent_snr": coherent_snr,
+        "network_snr": float(np.sqrt(net_sq)[ipk]),
         "best_gps": best_gps,
         "trigger_gps": trigger_gps,
         "detectors": dets,
-        "single_detector_peaks": {d: per_det[d]["peak"] for d in dets},
+        "single_detector_peaks": {i: float(abs(snr_series[i]).numpy().max()) for i in dets},
+        "sigma": {i: sig[i] for i in dets},
         "plot_file": plot_file,
     }
 
@@ -275,7 +299,7 @@ def _plot(outdir, times, net, trigger_gps, coherent_snr, best_gps) -> str:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(times - trigger_gps, net, ".", ms=3, color="tab:blue", label="Network SNR")
+    ax.plot(times - trigger_gps, net, ".", ms=3, color="tab:blue", label="Coherent SNR")
     ax.axvline(0.0, ls="--", color="green", label="Trigger time (T0)")
     ax.plot(
         best_gps - trigger_gps,
@@ -328,18 +352,20 @@ def run_from_skyportal_inputs(
     trigger_gps, dets = info["trigger_gps"], info["detectors"]
     window, t0_info = info["onsource_window"], info["t0_info"]
 
-    result = _search_network_snr(payload, params, trigger_gps, dets, window, outdir)
+    result = _coherent_search(payload, params, trigger_gps, dets, window, outdir)
 
     result_json = {
         "source": "pygrb",
-        "search": "network_coherent_snr",
+        "search": "coherent_dominant_polarization",
         "coherent_snr": result["coherent_snr"],
+        "network_snr": result["network_snr"],
         "best_gps": result["best_gps"],
         "trigger_gps": trigger_gps,
         "onsource_window": window,
         "t0_info": t0_info,
         "detectors": dets,
         "single_detector_peaks": result["single_detector_peaks"],
+        "sigma": result["sigma"],
         "mass1": float(params["mass1"]),
         "mass2": float(params["mass2"]),
         "f_lower": float(params["f_lower"]),
