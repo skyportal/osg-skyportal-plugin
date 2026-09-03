@@ -58,6 +58,11 @@ _BAND_MAP: dict[str, str] = {
     "ps1__r": "r",
     "ps1__i": "i",
     "ps1__z": "z",
+    # SkyPortal stores PS1 bands with a "::" separator (ps1::g, ...).
+    "ps1::g": "g",
+    "ps1::r": "r",
+    "ps1::i": "i",
+    "ps1::z": "z",
     "atlasc": "c",
     "atlaso": "o",
 }

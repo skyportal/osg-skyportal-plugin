@@ -26,6 +26,7 @@ lazily so this module stays importable in a bare test env.
 from __future__ import annotations
 
 import json
+import statistics
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -43,8 +44,13 @@ DEFAULTS: dict[str, Any] = {
     "f_lower": 25.0,
     "sample_rate": 2048,
     "psd_seconds": 512.0,  # strain used to estimate each detector's PSD
-    "onsource_window": 8.0,  # +/- s around the trigger to search for the peak
+    "onsource_window": 8.0,  # +/- s around the trigger (floor; widened by T0 below)
     "pad_seconds": 8.0,  # edge padding discarded after filtering
+    # KN T0 coupling (deck Test 3): center + width the on-source window on the KN
+    # light-curve fit's T0 posterior. Give t0_samples (MJD) or t0_sigma_days.
+    "t0_samples": None,
+    "t0_sigma_days": None,
+    "t0_window_nsigma": 5.0,
 }
 
 _VALID_DETECTORS = {"H1", "L1", "V1", "K1", "G1"}
@@ -80,17 +86,50 @@ def _resolve_sky(payload: dict, params: dict) -> tuple[float, float]:
     return float(np.deg2rad(float(ra))), float(np.deg2rad(float(dec)))
 
 
+def _resolve_trigger(params: dict) -> tuple[float, float, dict]:
+    """Resolve (trigger_gps, onsource_window_s, t0_info) from the request.
+
+    KN coupling (deck Test 3): if the KN light-curve fit's T0 posterior is passed
+    -- as ``t0_samples`` (MJD) or ``t0_sigma_days`` -- center the trigger on it and
+    widen the on-source window to +/- ``t0_window_nsigma`` * sigma, so the GW
+    search window is set by the KN inference rather than a fixed guess. Otherwise
+    use ``trigger_time`` and the fixed ``onsource_window``."""
+    floor = float(params["onsource_window"])
+    nsigma = float(params["t0_window_nsigma"])
+    samples = params.get("t0_samples")
+    if samples:
+        median_mjd = statistics.median(float(x) for x in samples)
+        sigma_days = statistics.pstdev(float(x) for x in samples)
+        window = max(floor, nsigma * sigma_days * 86400.0)
+        return (
+            _to_gps(median_mjd, "mjd"),
+            window,
+            {
+                "t0_source": "kn_posterior",
+                "t0_mjd": median_mjd,
+                "t0_sigma_days": sigma_days,
+            },
+        )
+    if params.get("trigger_time") is None:
+        raise ValueError("pygrb: trigger_time (or t0_samples) is required")
+    gps = _to_gps(params["trigger_time"], params["time_format"])
+    if params.get("t0_sigma_days") is not None:
+        sigma_days = float(params["t0_sigma_days"])
+        window = max(floor, nsigma * sigma_days * 86400.0)
+        return gps, window, {"t0_source": "kn_sigma", "t0_sigma_days": sigma_days}
+    return gps, floor, {"t0_source": "fixed"}
+
+
 def validate_inputs(payload: dict) -> dict:
     """Cheap pre-flight so the wrapper can fail fast (no data pulled): resolves
-    the trigger GPS, sky position, and detector list. Raises on bad input."""
+    the trigger GPS (from a fixed time or the KN T0 posterior), on-source window,
+    sky position, and detector list. Raises on bad input."""
     params = _params(payload)
-    if params.get("trigger_time") is None:
-        raise ValueError("pygrb: trigger_time is required")
-    gps = _to_gps(params["trigger_time"], params["time_format"])
+    gps, window, t0_info = _resolve_trigger(params)
     dets = [d for d in params["detectors"] if d in _VALID_DETECTORS]
     if len(dets) < 1:
         raise ValueError(f"pygrb: no valid detectors in {params['detectors']}")
-    return {"trigger_gps": gps, "detectors": dets}
+    return {"trigger_gps": gps, "onsource_window": window, "detectors": dets, "t0_info": t0_info}
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +161,12 @@ def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, event_na
 
 
 def _search_network_snr(
-    payload: dict, params: dict, trigger_gps: float, dets: list, outdir: Path
+    payload: dict,
+    params: dict,
+    trigger_gps: float,
+    dets: list,
+    onsource_window: float,
+    outdir: Path,
 ) -> dict:
     """Per-detector matched filter + sky-consistent (geocenter-aligned) network
     SNR around the trigger. A prototype of the PyGRB coherent statistic; the
@@ -137,7 +181,7 @@ def _search_network_snr(
     ra, dec = _resolve_sky(payload, params)
     srate = int(params["sample_rate"])
     f_low = float(params["f_lower"])
-    win = float(params["onsource_window"])
+    win = float(onsource_window)
     pad = float(params["pad_seconds"])
     seg = float(params["psd_seconds"])
     # Margin so the geocenter time-shift (<= Earth light-crossing ~0.043 s) stays
@@ -173,13 +217,21 @@ def _search_network_snr(
         per_det[ifo] = {"dt": dt, "peak": float(abs(snr).numpy().max())}
 
     # Common geocenter grid over the on-source window; sum |rho|^2 across dets.
-    times = np.arange(trigger_gps - win, trigger_gps + win, 1.0 / srate)
-    net_sq = np.zeros_like(times)
+    # Vectorized (index-shift each series by its geocenter delay) so wide,
+    # T0-posterior-driven windows stay fast; edge-guarded against short slices.
+    n = int(round(2.0 * win * srate))
+    times = (trigger_gps - win) + np.arange(n) / srate
+    net_sq = np.zeros(n)
     for ifo in dets:
         snr = snr_series[ifo]
-        dt = per_det[ifo]["dt"]
-        a = np.array([abs(complex(snr.at_time(t + dt, nearest_sample=True))) for t in times])
-        net_sq += a**2
+        arr = abs(snr.numpy())
+        i0 = int(
+            round((trigger_gps - win + per_det[ifo]["dt"] - float(snr.start_time)) / snr.delta_t)
+        )
+        a = max(0, -i0)
+        b = min(n, len(arr) - i0)
+        if b > a:
+            net_sq[a:b] += arr[i0 + a : i0 + b] ** 2
     net = np.sqrt(net_sq)
     ipk = int(np.argmax(net))
     coherent_snr = float(net[ipk])
@@ -255,8 +307,9 @@ def run_from_skyportal_inputs(
 
     info = validate_inputs(payload)
     trigger_gps, dets = info["trigger_gps"], info["detectors"]
+    window, t0_info = info["onsource_window"], info["t0_info"]
 
-    result = _search_network_snr(payload, params, trigger_gps, dets, outdir)
+    result = _search_network_snr(payload, params, trigger_gps, dets, window, outdir)
 
     result_json = {
         "source": "pygrb",
@@ -264,6 +317,8 @@ def run_from_skyportal_inputs(
         "coherent_snr": result["coherent_snr"],
         "best_gps": result["best_gps"],
         "trigger_gps": trigger_gps,
+        "onsource_window": window,
+        "t0_info": t0_info,
         "detectors": dets,
         "single_detector_peaks": result["single_detector_peaks"],
         "mass1": float(params["mass1"]),

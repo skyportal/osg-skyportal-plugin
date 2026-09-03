@@ -50,3 +50,29 @@ def test_validate_filters_unknown_detectors():
 def test_validate_rejects_no_valid_detectors():
     with pytest.raises(ValueError, match="no valid detectors"):
         pygrb_bridge.validate_inputs(_payload(detectors=["XX"]))
+
+
+def test_t0_samples_center_and_widen_window(monkeypatch):
+    """A KN T0 posterior (MJD samples) sets the trigger and widens the on-source
+    window to +/- n_sigma * sigma (deck Test 3). MJD->GPS is astropy's job; stub it
+    here to test the coupling logic without that dep."""
+    monkeypatch.setattr(pygrb_bridge, "_to_gps", lambda v, fmt: float(v))
+    samples = [57982.52, 57982.53, 57982.54]  # ~0.0082 d scatter
+    info = pygrb_bridge.validate_inputs(_payload(t0_samples=samples, onsource_window=8.0))
+    assert info["t0_info"]["t0_source"] == "kn_posterior"
+    assert info["t0_info"]["t0_mjd"] == pytest.approx(57982.53)
+    # 5 sigma * 0.008165 d * 86400 s/d ~ 3.5e3 s, far above the 8 s floor
+    assert info["onsource_window"] == pytest.approx(5 * 0.0081650 * 86400, rel=1e-3)
+    assert info["onsource_window"] > 8.0
+
+
+def test_t0_sigma_widens_window_over_floor():
+    info = pygrb_bridge.validate_inputs(_payload(t0_sigma_days=0.01, onsource_window=8.0))
+    assert info["t0_info"]["t0_source"] == "kn_sigma"
+    assert info["onsource_window"] == pytest.approx(5 * 0.01 * 86400)
+
+
+def test_fixed_trigger_uses_floor_window():
+    info = pygrb_bridge.validate_inputs(_payload(onsource_window=6.0))
+    assert info["t0_info"]["t0_source"] == "fixed"
+    assert info["onsource_window"] == 6.0
