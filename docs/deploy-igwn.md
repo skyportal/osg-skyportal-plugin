@@ -85,8 +85,11 @@ The containerised job (e.g. the pycbc image) uses the delivered token for data
 access, e.g.:
 
 ```python
-os.environ["BEARER_TOKEN_FILE"] = os.path.join(os.environ["_CONDOR_CREDS"], "scitokens.use")
+import os
+
 from gwdatafind import find_urls
+
+os.environ["BEARER_TOKEN_FILE"] = os.path.join(os.environ["_CONDOR_CREDS"], "scitokens.use")
 urls = find_urls("H", "H1_HOFT_C02", start, end, host="datafind.igwn.org")
 ```
 
