@@ -51,6 +51,9 @@ DEFAULTS: dict[str, Any] = {
     "t0_samples": None,
     "t0_sigma_days": None,
     "t0_window_nsigma": 5.0,
+    # Glitch gating: list of {ifo?, gps, window, taper} to zero out (tapered) loud
+    # transients before PSD/matched-filter -- e.g. the GW170817 L1 glitch.
+    "gates": None,
 }
 
 _VALID_DETECTORS = {"H1", "L1", "V1", "K1", "G1"}
@@ -135,6 +138,21 @@ def validate_inputs(payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Phase 1 search engine: network coherent SNR from the PyCBC Python API.
 # ---------------------------------------------------------------------------
+def _apply_gates(data, ifo: str, gates):
+    """Zero out (tapered) loud transients before PSD/filtering. Each gate is
+    {gps, window, taper, ifo?}; an ``ifo`` key restricts it to that detector
+    (omit to gate all). Used to remove e.g. the GW170817 L1 glitch."""
+    for g in gates or []:
+        if g.get("ifo") and g["ifo"] != ifo:
+            continue
+        data = data.gate(
+            float(g.get("gps", g.get("time"))),
+            window=float(g.get("window", 0.5)),
+            taper_width=float(g.get("taper", 0.25)),
+        )
+    return data
+
+
 def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, event_name):
     """Public GWOSC strain for one detector, sliced to [start, end] and resampled.
 
@@ -196,6 +214,7 @@ def _search_network_snr(
     for ifo in dets:
         data = _fetch_strain(ifo, start, end, srate, event_name)
         data = data.highpass_fir(f_low, 512)
+        data = _apply_gates(data, ifo, params.get("gates"))
         psd = interpolate(data.psd(4), data.delta_f)
         psd = inverse_spectrum_truncation(
             psd, int(4 * data.sample_rate), low_frequency_cutoff=f_low
