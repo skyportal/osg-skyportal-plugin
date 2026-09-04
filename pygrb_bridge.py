@@ -45,6 +45,9 @@ DEFAULTS: dict[str, Any] = {
     "sample_rate": 2048,
     "psd_seconds": 512.0,  # strain used to estimate each detector's PSD
     "onsource_window": 8.0,  # +/- s around the trigger (floor; widened by T0 below)
+    # "t0": center + widen the window on the KN T0 posterior (below); "fixed": use
+    # onsource_window as the exact +/- window (e.g. 6s PyGRB, 1000s X-pipeline/GRB).
+    "onsource_mode": "t0",
     "pad_seconds": 8.0,  # edge padding discarded after filtering
     # KN T0 coupling (deck Test 3): center + width the on-source window on the KN
     # light-curve fit's T0 posterior. Give t0_samples (MJD) or t0_sigma_days.
@@ -138,35 +141,64 @@ def _resolve_sky(payload: dict, params: dict) -> tuple[float, float]:
 def _resolve_trigger(params: dict) -> tuple[float, float, dict]:
     """Resolve (trigger_gps, onsource_window_s, t0_info) from the request.
 
-    KN coupling (deck Test 3): if the KN light-curve fit's T0 posterior is passed
-    -- as ``t0_samples`` (MJD) or ``t0_sigma_days`` -- center the trigger on it and
-    widen the on-source window to +/- ``t0_window_nsigma`` * sigma, so the GW
-    search window is set by the KN inference rather than a fixed guess. Otherwise
-    use ``trigger_time`` and the fixed ``onsource_window``."""
+    Two window modes (``onsource_mode``):
+    - ``t0`` (default): center on the KN light-curve fit's T0 posterior and widen
+      the on-source window to +/- ``t0_window_nsigma`` * sigma (floored by
+      ``onsource_window``), so the search window is set by the KN inference. T0 is
+      passed as ``t0_samples`` (MJD) or ``t0_sigma_days``; absent both, falls back
+      to ``trigger_time`` with the fixed ``onsource_window``.
+    - ``fixed``: use ``onsource_window`` as the exact +/- window (e.g. 6s PyGRB,
+      1000s X-pipeline/GRB), still centered on the T0 median (or ``trigger_time``).
+    """
     floor = float(params["onsource_window"])
     nsigma = float(params["t0_window_nsigma"])
+    mode = str(params.get("onsource_mode", "t0")).strip().lower()
     samples = params.get("t0_samples")
+
+    # Center: KN T0 posterior median if given, else the fixed trigger_time.
     if samples:
-        median_mjd = statistics.median(float(x) for x in samples)
+        center_mjd = statistics.median(float(x) for x in samples)
+        center_gps = _to_gps(center_mjd, "mjd")
         sigma_days = statistics.pstdev(float(x) for x in samples)
+    else:
+        if params.get("trigger_time") is None:
+            raise ValueError("pygrb: trigger_time (or t0_samples) is required")
+        center_gps = _to_gps(params["trigger_time"], params["time_format"])
+        sig = params.get("t0_sigma_days")
+        sigma_days = float(sig) if sig is not None else None
+
+    # Fixed mode: user-set on-source window, ignore the T0 spread for sizing.
+    if mode == "fixed":
+        info = {"t0_source": "fixed_window", "onsource_mode": "fixed"}
+        if samples:
+            info["t0_mjd"] = center_mjd
+        return center_gps, floor, info
+
+    # T0 mode (default): widen to +/- nsigma * sigma from the KN posterior.
+    if samples:
         window = max(floor, nsigma * sigma_days * 86400.0)
         return (
-            _to_gps(median_mjd, "mjd"),
+            center_gps,
             window,
             {
                 "t0_source": "kn_posterior",
-                "t0_mjd": median_mjd,
+                "t0_mjd": center_mjd,
                 "t0_sigma_days": sigma_days,
+                "onsource_mode": "t0",
             },
         )
-    if params.get("trigger_time") is None:
-        raise ValueError("pygrb: trigger_time (or t0_samples) is required")
-    gps = _to_gps(params["trigger_time"], params["time_format"])
-    if params.get("t0_sigma_days") is not None:
-        sigma_days = float(params["t0_sigma_days"])
+    if sigma_days is not None:
         window = max(floor, nsigma * sigma_days * 86400.0)
-        return gps, window, {"t0_source": "kn_sigma", "t0_sigma_days": sigma_days}
-    return gps, floor, {"t0_source": "fixed"}
+        return (
+            center_gps,
+            window,
+            {
+                "t0_source": "kn_sigma",
+                "t0_sigma_days": sigma_days,
+                "onsource_mode": "t0",
+            },
+        )
+    return center_gps, floor, {"t0_source": "fixed", "onsource_mode": "t0"}
 
 
 def validate_inputs(payload: dict) -> dict:
