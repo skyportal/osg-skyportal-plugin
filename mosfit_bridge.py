@@ -273,6 +273,26 @@ def _posterior_samples(entry: dict, cap: int = 400) -> dict:
     return samples
 
 
+def _patch_mosfit_cache_writable() -> None:
+    """MOSFiT's Converter writes key_cache_*.pickle under its package dir, which is
+    read-only in the Apptainer image; default its cache_path to writable scratch."""
+    import mosfit.converter as mc
+
+    if getattr(mc.Converter, "_osg_cache_patched", False):
+        return
+    orig_init = mc.Converter.__init__
+
+    def init(self, printer, guess=True, cache_path="", **kwargs):
+        if not cache_path:
+            cache_path = os.environ.get("MOSFIT_CACHE_DIR") or tempfile.mkdtemp(
+                prefix="mosfit_cache_"
+            )
+        orig_init(self, printer, guess=guess, cache_path=cache_path, **kwargs)
+
+    mc.Converter.__init__ = init
+    mc.Converter._osg_cache_patched = True
+
+
 def run_from_skyportal_inputs(
     payload: dict[str, Any], *, outdir: Path | None = None, resource_id: str = "obj", seed: int = 42
 ) -> dict[str, Any]:
@@ -281,6 +301,8 @@ def run_from_skyportal_inputs(
     n_detections, json_result_file}."""
     import numpy as np
     from mosfit.fitter import Fitter
+
+    _patch_mosfit_cache_writable()
 
     params = _params(payload)
     source = str(params["source"])
