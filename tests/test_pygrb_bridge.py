@@ -76,3 +76,44 @@ def test_fixed_trigger_uses_floor_window():
     info = pygrb_bridge.validate_inputs(_payload(onsource_window=6.0))
     assert info["t0_info"]["t0_source"] == "fixed"
     assert info["onsource_window"] == 6.0
+
+
+def test_fixed_mode_keeps_exact_window_despite_sigma():
+    # onsource_mode=fixed must ignore the T0 spread and use onsource_window exactly.
+    info = pygrb_bridge.validate_inputs(
+        _payload(onsource_mode="fixed", onsource_window=6.0, t0_sigma_days=0.01)
+    )
+    assert info["t0_info"]["onsource_mode"] == "fixed"
+    assert info["onsource_window"] == 6.0
+
+
+def test_fixed_mode_centers_on_t0_samples(monkeypatch):
+    monkeypatch.setattr(pygrb_bridge, "_to_gps", lambda v, fmt: float(v))
+    info = pygrb_bridge.validate_inputs(
+        _payload(
+            onsource_mode="fixed",
+            onsource_window=1000.0,
+            t0_samples=[57982.52, 57982.53, 57982.54],
+        )
+    )
+    assert info["onsource_window"] == 1000.0  # not widened by the sample spread
+    assert info["t0_info"]["t0_mjd"] == pytest.approx(57982.53)
+
+
+def test_subsegment_centers_tile_window():
+    t0, window, subseg = 1187008884.0, 1500.0, 1000.0
+    segs = pygrb_bridge._subsegment_centers(t0, window, subseg)
+    assert len(segs) == 3  # ceil(2*1500 / 1000)
+    assert all(h == pytest.approx(500.0) for _, h in segs)  # window / n_sub
+    # Contiguous and covering exactly [t0-window, t0+window].
+    assert segs[0][0] - segs[0][1] == pytest.approx(t0 - window)
+    assert segs[-1][0] + segs[-1][1] == pytest.approx(t0 + window)
+    for (c0, h0), (c1, h1) in zip(segs, segs[1:]):
+        assert c0 + h0 == pytest.approx(c1 - h1)
+
+
+def test_subsegment_centers_single_when_window_small():
+    t0, window, subseg = 1187008884.0, 400.0, 1000.0
+    segs = pygrb_bridge._subsegment_centers(t0, window, subseg)
+    assert len(segs) == 1
+    assert segs[0] == (pytest.approx(t0), pytest.approx(window))

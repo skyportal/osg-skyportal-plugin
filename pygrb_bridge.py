@@ -54,6 +54,12 @@ DEFAULTS: dict[str, Any] = {
     "t0_samples": None,
     "t0_sigma_days": None,
     "t0_window_nsigma": 5.0,
+    # Large KN windows: split the on-source window into subsegments of this many
+    # seconds and re-evaluate the antenna patterns per subsegment (beyond ~1000s
+    # Earth rotation makes them time-dependent within one segment). None/0 = one
+    # segment. Marion Pillas's near-term KN recipe until the multi_inspiral-based
+    # KN-targeted pipeline lands (see docs/phase2-pygrb.md).
+    "subsegment_seconds": None,
     # Glitch gating: list of {ifo?, gps, window, taper} to zero out (tapered) loud
     # transients before PSD/matched-filter -- e.g. the GW170817 L1 glitch.
     "gates": None,
@@ -331,6 +337,7 @@ def _coherent_search(
     dets: list,
     onsource_window: float,
     outdir: Path,
+    make_plot: bool = True,
 ) -> dict:
     """Dominant-polarization coherent search over the on-source window, optionally
     over a (KN-constrained) template bank. Conditions each detector's data once,
@@ -418,7 +425,11 @@ def _coherent_search(
     win_snr, win_sig = _template_series(best_m1, best_m2)
 
     trig_t, trig_s = _extract_triggers(times, best_coh, srate, float(params["trigger_threshold"]))
-    plot_file = _plot(outdir, trig_t, trig_s, trigger_gps, coherent_snr, best_gps)
+    # Subsegment callers combine the raw triggers and plot once, so make the plot
+    # optional and always hand back the trigger arrays.
+    plot_file = (
+        _plot(outdir, trig_t, trig_s, trigger_gps, coherent_snr, best_gps) if make_plot else None
+    )
     return {
         "coherent_snr": coherent_snr,
         "network_snr": float(best_net[ipk]),
@@ -430,8 +441,57 @@ def _coherent_search(
         "best_template": {"mass1": float(best_m1), "mass2": float(best_m2)},
         "single_detector_peaks": {i: float(abs(win_snr[i]).numpy().max()) for i in dets},
         "sigma": {i: win_sig[i] for i in dets},
+        "trig_times": trig_t,
+        "trig_snrs": trig_s,
         "plot_file": plot_file,
     }
+
+
+def _subsegment_centers(trigger_gps: float, window: float, subseg_s: float) -> list:
+    """Tile ``[t0-window, t0+window]`` with ``ceil(2*window/subseg_s)`` equal,
+    contiguous subsegments; return ``[(center, half_width), ...]``. Each becomes
+    an independent coherent search with antenna patterns evaluated at its centre."""
+    import math
+
+    n_sub = max(1, math.ceil(2.0 * window / float(subseg_s)))
+    sub_half = window / n_sub
+    return [(trigger_gps - window + sub_half * (2 * k + 1), sub_half) for k in range(n_sub)]
+
+
+def _subsegment_search(
+    payload: dict,
+    params: dict,
+    trigger_gps: float,
+    dets: list,
+    window: float,
+    subseg_s: float,
+    outdir: Path,
+) -> dict:
+    """Large-window KN search: run the coherent search on each subsegment (antenna
+    patterns re-evaluated per subsegment centre) and report the loudest candidate
+    across all, with one combined trigger distribution on the full-window axis."""
+    import numpy as np
+
+    segments = _subsegment_centers(trigger_gps, window, subseg_s)
+    best, all_t, all_s, n_trig = None, [], [], 0
+    for center, sub_half in segments:
+        r = _coherent_search(payload, params, center, dets, sub_half, outdir, make_plot=False)
+        all_t.append(r["trig_times"])
+        all_s.append(r["trig_snrs"])
+        n_trig += r["n_triggers"]
+        if best is None or r["coherent_snr"] > best["coherent_snr"]:
+            best = r
+
+    trig_t = np.concatenate(all_t) if all_t else np.array([])
+    trig_s = np.concatenate(all_s) if all_s else np.array([])
+    plot_file = _plot(outdir, trig_t, trig_s, trigger_gps, best["coherent_snr"], best["best_gps"])
+
+    out = dict(best)
+    out["trigger_gps"] = trigger_gps  # loudest subsegment's centre -> the KN T0
+    out["n_triggers"] = int(n_trig)
+    out["plot_file"] = plot_file
+    out["subsegments"] = {"n": len(segments), "subsegment_seconds": 2.0 * window / len(segments)}
+    return out
 
 
 def _extract_triggers(times, coh, srate, threshold, cluster_s=0.1, max_n=4000):
@@ -525,7 +585,14 @@ def run_from_skyportal_inputs(
     trigger_gps, dets = info["trigger_gps"], info["detectors"]
     window, t0_info = info["onsource_window"], info["t0_info"]
 
-    result = _coherent_search(payload, params, trigger_gps, dets, window, outdir)
+    # Large windows: subsegment so antenna patterns stay valid per chunk.
+    subseg_s = params.get("subsegment_seconds")
+    if subseg_s and float(subseg_s) > 0 and 2.0 * window > float(subseg_s):
+        result = _subsegment_search(
+            payload, params, trigger_gps, dets, window, float(subseg_s), outdir
+        )
+    else:
+        result = _coherent_search(payload, params, trigger_gps, dets, window, outdir)
 
     result_json = {
         "source": "pygrb",
@@ -544,6 +611,8 @@ def run_from_skyportal_inputs(
         "sigma": result["sigma"],
         "f_lower": float(params["f_lower"]),
     }
+    if "subsegments" in result:
+        result_json["subsegments"] = result["subsegments"]
     result_file = outdir / "pygrb_result.json"
     result_file.write_text(json.dumps(result_json))
 
