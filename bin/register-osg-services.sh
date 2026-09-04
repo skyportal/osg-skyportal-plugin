@@ -43,6 +43,15 @@ python register_analysis_service.py \
   --input-data-types spectra redshift \
   --optional-params-json '{"wrapper": ["ngsf"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest", "docker://michaelwcoughlin/ngsf"], "spectrum_index": {"type": "number"}, "instrument": ["", "NGPS", "GHTS"], "n_results": {"type": "number", "default": 3}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
 
+# SNID-SAGE — spectral classification alternative to NGSF (spectrum_fitting). Its
+# image bakes in the template bank; the fit is single-threaded, ~min, <1 GB.
+python register_analysis_service.py \
+  --name SNID_OSG --display "SNID-SAGE (OSG)" \
+  --listener-url http://localhost:7100/analysis/snid_osg \
+  --analysis-type spectrum_fitting \
+  --input-data-types spectra redshift \
+  --optional-params-json '{"wrapper": ["snid"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/ghcr.io/fiorenst/snid-sage:latest", "docker://ghcr.io/fiorenst/snid-sage"], "spectrum_index": {"type": "number"}, "free_redshift": ["False", "True"], "n_results": {"type": "number", "default": 5}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
+
 # Already registered (kept here for reference / re-registration):
 #   Fiesta_OSG      -> backend fiesta, /analysis/fiesta_osg
 #   PeriodFind_OSG  -> wrapper periodfind, /analysis/periodfind

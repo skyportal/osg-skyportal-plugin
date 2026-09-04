@@ -233,9 +233,14 @@ def _stage_wrapper_job(
     # wraps), named explicitly with the `wrapper` param, or requested per-job
     # via `use_wrapper`. A named wrapper implies wrapper mode.
     wrapper = str(params.get("wrapper", "")).strip().lower()
-    use_wrapper = wrapper in ("fiesta", "periodfind", "mosfit", "pygrb", "ngsf") or params.get(
-        "use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False)
-    )
+    use_wrapper = wrapper in (
+        "fiesta",
+        "periodfind",
+        "mosfit",
+        "pygrb",
+        "ngsf",
+        "snid",
+    ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
         return {}, None
 
@@ -273,6 +278,12 @@ def _stage_wrapper_job(
             (plugin_dir / "ngsf_wrapper.py").resolve(),
             (plugin_dir / "ngsf_bridge.py").resolve(),
         ]
+    elif wrapper == "snid":
+        wrapper_name = "snid_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "snid_wrapper.py").resolve(),
+            (plugin_dir / "snid_bridge.py").resolve(),
+        ]
     else:
         wrapper_name = "fiesta_wrapper.py"
         wrapper_files = [
@@ -306,7 +317,7 @@ def _stage_wrapper_job(
     # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under
     # its basename; populate it out-of-band.
     jax_cache_dir = cfg.get("jax_cache_dir")
-    if wrapper not in ("periodfind", "mosfit", "pygrb", "ngsf") and jax_cache_dir:
+    if wrapper not in ("periodfind", "mosfit", "pygrb", "ngsf", "snid") and jax_cache_dir:
         cache_path = Path(jax_cache_dir).resolve()
         if cache_path.is_dir() and any(cache_path.iterdir()):
             transfer.append(str(cache_path))
@@ -506,6 +517,9 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     elif wrapper == "ngsf":
         wrapper_name = "ngsf_wrapper.py"
         wrapper_files = [plugin_dir / "ngsf_wrapper.py", plugin_dir / "ngsf_bridge.py"]
+    elif wrapper == "snid":
+        wrapper_name = "snid_wrapper.py"
+        wrapper_files = [plugin_dir / "snid_wrapper.py", plugin_dir / "snid_bridge.py"]
     else:
         wrapper_name = "fiesta_wrapper.py"
         wrapper_files = [
@@ -1030,6 +1044,8 @@ class AnalysisHandler(tornado.web.RequestHandler):
                     params.setdefault("wrapper", "pygrb")
                 elif "ngsf" in name:
                     params.setdefault("wrapper", "ngsf")
+                elif "snid" in name:
+                    params.setdefault("wrapper", "snid")
                 elif "redback" in name:
                     params.setdefault("backend", "redback")
 
