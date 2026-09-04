@@ -148,11 +148,23 @@ def test_resolve_redshift_absent():
     assert snid_bridge.resolve_redshift(_payload()) is None
 
 
+def test_read_model_spectrum(tmp_path):
+    (tmp_path / "x_template_01_flux.dat").write_text("4000 1.0\n5000 2.0\nheader line\n6000 3.0\n")
+    ms = snid_bridge.read_model_spectrum(tmp_path, "x")
+    assert ms == [[4000.0, 1.0], [5000.0, 2.0], [6000.0, 3.0]]
+
+
+def test_read_model_spectrum_missing(tmp_path):
+    assert snid_bridge.read_model_spectrum(tmp_path, "nope") is None
+
+
 def test_run_end_to_end_stubbed(tmp_path, monkeypatch):
-    # Stub the sage subprocess: emit the summary line + write the .output table.
+    # Stub the sage subprocess: emit the summary line + write the .output table
+    # and a best-template flux file (for the overlay).
     def fake_run(spectrum, outdir, z, timeout):
         stem = spectrum.stem
         (outdir / f"{stem}.output").write_text(OUTPUT_TABLE)
+        (outdir / f"{stem}_template_01_flux.dat").write_text("4000 1.0\n5000 2.0\n")
         return SUMMARY_LINE
 
     monkeypatch.setattr(snid_bridge, "_run_sage", fake_run)
@@ -164,4 +176,5 @@ def test_run_end_to_end_stubbed(tmp_path, monkeypatch):
     assert result["annotations"]["snid_subtype"] == "II-flash"
     assert result["results"]["classification"]["match_quality"] == "High"
     assert len(result["results"]["template_matches"]) == 3
+    assert result["model_spectrum"] == [[4000.0, 1.0], [5000.0, 2.0]]
     assert "II" in result["message"]

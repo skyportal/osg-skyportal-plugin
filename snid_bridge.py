@@ -228,6 +228,30 @@ def _collect_plots(outdir: Path, stem: str) -> list[str]:
     return sorted(str(p) for p in outdir.glob(f"{stem}*.png"))
 
 
+def read_model_spectrum(outdir: Path, stem: str, max_points: int = 3000) -> list | None:
+    """Best-match fluxed template (SNID-SAGE --complete writes
+    ``<stem>_template_01_flux.dat``) as ``[[wavelength, flux], ...]`` for the
+    SkyPortal spectrum-plot overlay. Downsampled so the payload stays small."""
+    f = outdir / f"{stem}_template_01_flux.dat"
+    if not f.exists():
+        cand = sorted(outdir.glob(f"{stem}_template_*_flux.dat"))
+        if not cand:
+            return None
+        f = cand[0]
+    pts = []
+    for line in f.read_text().splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            w, fl = _to_float(parts[0]), _to_float(parts[1])
+            if w is not None and fl is not None:
+                pts.append([w, fl])
+    if not pts:
+        return None
+    if len(pts) > max_points:
+        pts = pts[:: (len(pts) // max_points + 1)]
+    return pts
+
+
 def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir: str = ".") -> dict:
     params = _params(payload)
     n_results = int(params["n_results"])
@@ -249,6 +273,7 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     summary = parse_summary(stdout)
     matches = parse_template_matches(outdir / f"{stem}.output", n_results)
     plots = _collect_plots(outdir, stem)
+    model_spectrum = read_model_spectrum(outdir, stem)
 
     annotations = {
         "snid_classification": summary.get("type"),
@@ -285,5 +310,6 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
             "template_matches": matches,
         },
         "annotations": annotations,
+        "model_spectrum": model_spectrum,
         "plot_files": plots,
     }
