@@ -125,3 +125,44 @@ apptainer build --fakeroot --mksquashfs-args "-processors 1" mosfit.sif mosfit.d
 ```
 
 MOSFiT is CPU-only (emcee/dynesty) — no GPU variant.
+
+## NGSF image (built in the NGSF repo)
+
+The NGSF backend (`analysis_parameters.wrapper: "ngsf"`) is the one service that
+fits **spectra** rather than photometry, so it registers with
+`--analysis-type spectrum_fitting --input-data-types spectra redshift`. The
+plugin ships `ngsf_wrapper.py` + `ngsf_bridge.py` per-job, so the image is a
+generic NGSF runtime.
+
+The `.def`/Dockerfile lives in **NGSF** (`containers/Dockerfile`), not here.
+Three things are load-bearing:
+
+1. **The WISeREP template bank is baked in.** NGSF is useless without it and a
+   worker cannot fetch it, so the build downloads `supyfit_bank.zip` (74 MB
+   zipped, 209 MB unpacked) to `/opt/ngsf-bank` and asserts it is non-empty.
+   WISeREP serves an error page unless the request sends a browser User-Agent.
+2. **`pkg_dir` is both the code root and the output root** — `get_metadata`
+   reads `<pkg_dir>/NGSF/mjd_of_maximum_brightness.csv` while `sf_class` writes
+   `<pkg_dir>/fit_results*/`. The image tree is read-only under apptainer, so
+   the bridge copies `/opt/NGSF` into the job sandbox and points `pkg_dir`
+   there. The bank stays in the image (it is only ever read).
+3. **NGSF must not import-fail on git.** `NGSF_version` shells out to
+   `git describe` at import; under apptainer the tree is owned by another uid
+   and git refuses it ("dubious ownership"), which would fail every job. NGSF
+   now falls back to a baked `NGSF/.version`.
+
+Build + push, then register for CVMFS sync exactly like the fiesta image:
+
+```bash
+docker buildx build --platform linux/amd64 -f containers/Dockerfile \
+  -t docker.io/michaelwcoughlin/ngsf:latest --push .
+# then add michaelwcoughlin/ngsf:latest to docker_images.txt in
+# opensciencegrid/cvmfs-singularity-sync, and point singularity_image at
+# /cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest
+```
+
+Sizing (measured on the NGSF test spectrum, 5735 samples, 10 A binning):
+free-redshift scan over z=0–0.15 is ~4.5 min on one core, the fixed-z refits are
+~2 s each, and peak RSS is ~420 MB. NGSF is single-threaded numpy with no
+multiprocessing, so `request_cpus: 1`; the stock `request_memory: 2048` and
+`max_runtime_seconds: 3600` are both comfortable.

@@ -34,6 +34,15 @@ python register_analysis_service.py \
   --input-data-types photometry redshift \
   --optional-params-json '{"source": ["default", "slsn", "magnetar", "csm", "csmni", "ia", "tde", "kilonova", "nsbh", "bns"], "wrapper": ["mosfit"], "singularity_image": ["docker://ashleyvillar/mosfit", "/cvmfs/singularity.opensciencegrid.org/ashleyvillar/mosfit:latest"], "fix_z": ["True", "False"]}'
 
+# NGSF — the one service taking spectra, not photometry (spectrum_fitting). Its
+# image bakes in the template bank; the fit is ~4-5 min on one core, <1 GB.
+python register_analysis_service.py \
+  --name NGSF_OSG --display "NGSF (OSG)" \
+  --listener-url http://localhost:7100/analysis/ngsf_osg \
+  --analysis-type spectrum_fitting \
+  --input-data-types spectra redshift \
+  --optional-params-json '{"wrapper": ["ngsf"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest", "docker://michaelwcoughlin/ngsf"], "spectrum_index": {"type": "number"}, "instrument": ["", "NGPS", "GHTS"], "n_results": {"type": "number", "default": 3}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
+
 # Already registered (kept here for reference / re-registration):
 #   Fiesta_OSG      -> backend fiesta, /analysis/fiesta_osg
 #   PeriodFind_OSG  -> wrapper periodfind, /analysis/periodfind
