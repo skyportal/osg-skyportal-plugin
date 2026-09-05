@@ -65,6 +65,8 @@ def bundle_for_skyportal(result: dict) -> dict:
     # how fiesta emits model_lightcurve).
     if result.get("model_spectrum"):
         analysis["model_spectrum"] = result["model_spectrum"]
+    if result.get("model_spectrum_summary"):
+        analysis["model_spectrum_summary"] = result["model_spectrum_summary"]
     return {
         "status": "success",
         "message": result.get("message", "SNID-SAGE complete"),

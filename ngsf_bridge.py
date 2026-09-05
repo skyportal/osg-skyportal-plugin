@@ -329,6 +329,20 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     headline = passes.get("fixed_z") or passes.get("refit_at_best_z") or passes["free_z"]
     best = headline["best"]
     model_spectrum = headline.get("model_spectrum")
+
+    # Classification headline for the overlay hover (type/z/chi2/host).
+    model_spectrum_summary = None
+    if best:
+        bits = [t for t in [_sn_type(best)] if t]
+        z_best = _to_float(best.get("Z"))
+        if z_best is not None:
+            bits.append(f"z={z_best:.4f}")
+        chi2 = _to_float(best.get("CHI2/dof"))
+        if chi2 is not None:
+            bits.append(f"chi2/dof {chi2:.2f}")
+        if best.get("GALAXY"):
+            bits.append(f"host {best['GALAXY']}")
+        model_spectrum_summary = " · ".join(bits) or None
     annotations = {}
     if best:
         annotations = {
@@ -364,5 +378,6 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         },
         "annotations": annotations,
         "model_spectrum": model_spectrum,
+        "model_spectrum_summary": model_spectrum_summary,
         "plot_files": plot_files,
     }

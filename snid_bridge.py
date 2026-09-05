@@ -275,6 +275,18 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     plots = _collect_plots(outdir, stem)
     model_spectrum = read_model_spectrum(outdir, stem)
 
+    # Classification headline for the overlay hover (type/subtype/z/quality/score).
+    model_spectrum_summary = None
+    if summary.get("type"):
+        bits = [" ".join(filter(None, [summary.get("type"), summary.get("subtype")]))]
+        if summary.get("redshift") is not None:
+            bits.append(f"z={summary['redshift']:.4f}")
+        if summary.get("match_quality"):
+            bits.append(f"MatchQual {summary['match_quality']}")
+        if matches and matches[0].get("score") is not None:
+            bits.append(f"score {matches[0]['score']:.1f}")
+        model_spectrum_summary = " · ".join(bits)
+
     annotations = {
         "snid_classification": summary.get("type"),
         "snid_subtype": summary.get("subtype"),
@@ -311,5 +323,6 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         },
         "annotations": annotations,
         "model_spectrum": model_spectrum,
+        "model_spectrum_summary": model_spectrum_summary,
         "plot_files": plots,
     }

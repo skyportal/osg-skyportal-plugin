@@ -177,4 +177,7 @@ def test_run_end_to_end_stubbed(tmp_path, monkeypatch):
     assert result["results"]["classification"]["match_quality"] == "High"
     assert len(result["results"]["template_matches"]) == 3
     assert result["model_spectrum"] == [[4000.0, 1.0], [5000.0, 2.0]]
+    summary = result["model_spectrum_summary"]
+    assert "II II-flash" in summary and "MatchQual High" in summary
+    assert "score 35.3" in summary  # best template HσLAP-CCC
     assert "II" in result["message"]
