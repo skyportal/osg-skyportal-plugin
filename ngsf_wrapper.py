@@ -61,6 +61,10 @@ def bundle_for_skyportal(result: dict) -> dict:
 
     if result.get("annotations"):
         analysis["annotations"] = result["annotations"]
+    # Top-level so SkyPortal surfaces it for the spectrum-plot overlay (mirrors
+    # how fiesta emits model_lightcurve).
+    if result.get("model_spectrum"):
+        analysis["model_spectrum"] = result["model_spectrum"]
     return {
         "status": "success",
         "message": result.get("message", "NGSF complete"),

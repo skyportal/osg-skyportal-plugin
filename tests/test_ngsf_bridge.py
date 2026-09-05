@@ -184,3 +184,17 @@ def test_duplicates_scan_skips_a_redundant_fixed_z_pass():
     # Nothing to compare against.
     assert not ngsf_bridge._duplicates_scan(None, 0.127, 0.001)
     assert not ngsf_bridge._duplicates_scan(0.127, None, 0.001)
+
+
+def test_read_model_spectrum(tmp_path):
+    p = tmp_path / "x_ngsf0_model.txt"
+    p.write_text("4000 1.0\n5000 2.0\n# header\n6000 3.0\n")
+    assert ngsf_bridge.read_model_spectrum(p) == [
+        [4000.0, 1.0],
+        [5000.0, 2.0],
+        [6000.0, 3.0],
+    ]
+
+
+def test_read_model_spectrum_missing(tmp_path):
+    assert ngsf_bridge.read_model_spectrum(tmp_path / "nope.txt") is None

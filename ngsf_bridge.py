@@ -215,6 +215,26 @@ def _run_ngsf(tree: Path, spectrum: Path, z: float, lo: float, hi: float, timeou
     return proc.stdout
 
 
+def read_model_spectrum(path: Path, max_points: int = 3000) -> list | None:
+    """Best-fit model spectrum (NGSF sf_class.py writes ``<stem>_ngsf0_model.txt``,
+    two columns wavelength/model-flux) as ``[[wavelength, flux], ...]`` for the
+    SkyPortal spectrum-plot overlay. Downsampled so the payload stays small."""
+    if not path.exists():
+        return None
+    pts = []
+    for line in path.read_text().splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            w, fl = _to_float(parts[0]), _to_float(parts[1])
+            if w is not None and fl is not None:
+                pts.append([w, fl])
+    if not pts:
+        return None
+    if len(pts) > max_points:
+        pts = pts[:: (len(pts) // max_points + 1)]
+    return pts
+
+
 def _collect(tree: Path, stem: str, free_z: bool, n_results: int) -> dict:
     """Read one pass's results CSV and its ranked fit plots."""
     out_dir = tree / ("fit_results" if free_z else "fit_results_z")
@@ -237,7 +257,13 @@ def _collect(tree: Path, stem: str, free_z: bool, n_results: int) -> dict:
         png = out_dir / f"{stem}_ngsf{i}.png"
         if png.exists():
             plots.append(str(png))
-    return {"rows": top, "best": top[0] if top else None, "plot_files": plots}
+    model_spectrum = read_model_spectrum(out_dir / f"{stem}_ngsf0_model.txt")
+    return {
+        "rows": top,
+        "best": top[0] if top else None,
+        "plot_files": plots,
+        "model_spectrum": model_spectrum,
+    }
 
 
 def _duplicates_scan(z_skyportal: float | None, z_fit: float | None, z_int: float) -> bool:
@@ -302,6 +328,7 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     # Prefer the catalog-redshift fit for annotations; it is the more trustworthy.
     headline = passes.get("fixed_z") or passes.get("refit_at_best_z") or passes["free_z"]
     best = headline["best"]
+    model_spectrum = headline.get("model_spectrum")
     annotations = {}
     if best:
         annotations = {
@@ -336,5 +363,6 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
             "passes": passes,
         },
         "annotations": annotations,
+        "model_spectrum": model_spectrum,
         "plot_files": plot_files,
     }
