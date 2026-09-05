@@ -198,3 +198,10 @@ def test_read_model_spectrum(tmp_path):
 
 def test_read_model_spectrum_missing(tmp_path):
     assert ngsf_bridge.read_model_spectrum(tmp_path / "nope.txt") is None
+
+
+def test_read_model_spectrum_ngsf_format(tmp_path):
+    # NGSF's exact output: a comment header, two columns, possible nan rows.
+    p = tmp_path / "s_ngsf0_model.txt"
+    p.write_text("# wavelength(A) model_flux\n4000 1.05\n4010 nan\n4020 0.97\n")
+    assert ngsf_bridge.read_model_spectrum(p) == [[4000.0, 1.05], [4020.0, 0.97]]
