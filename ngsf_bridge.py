@@ -242,9 +242,11 @@ def read_model_spectrum(path: Path, max_points: int = 3000) -> list | None:
 def chi2_constraint_width(path: Path) -> float | None:
     """Width in z of the near-minimum region of NGSF's chi2(z) profile
     (``<stem>_chi2_vs_z.csv``): max minus min Z over the grid steps within 1% of
-    the best reduced chi2. A shape measure of how pinned-down the redshift is,
-    not a calibrated error. None when the profile is absent or has no shape (a
-    fixed-z run writes a single row)."""
+    the best reduced chi2. A shape measure only, and NOT a quality indicator:
+    empirically width does not predict correctness (NGSF's minima are sharp
+    whether the redshift is right or wrong), so never surface it as a confidence
+    or quality score. None when the profile is absent or has no shape (a fixed-z
+    run writes a single row)."""
     if not path.exists():
         return None
     rows = []
@@ -374,9 +376,9 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     best_chi2 = _to_float(best.get("CHI2/dof")) if best else None
     fit_ok = best is not None and best_chi2 is not None and math.isfinite(best_chi2)
 
-    # How tightly the scan's chi2(z) profile constrains z (width of the near-min
-    # region). Comes from the free-z scan; the fixed-z pass is a single point.
-    # A shape measure, not a calibrated error, so surface it under a plain name.
+    # Width of the near-minimum region of the scan's chi2(z) profile (the fixed-z
+    # pass is a single point). A shape measure only; width does not predict
+    # correctness, so it stays a plain field, never a confidence score.
     chi2_width = (passes.get("free_z") or {}).get("chi2_z_width")
 
     results = {

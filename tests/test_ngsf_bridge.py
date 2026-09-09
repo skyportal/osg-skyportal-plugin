@@ -244,7 +244,9 @@ def test_overlap_fraction():
 
 
 def test_chi2_constraint_width_pinned(tmp_path):
-    # Only the two grid steps at the minimum sit within 1% of the best chi2.
+    # Only the two grid steps at the minimum sit within 1% of the best chi2. A
+    # tight width measures a sharp minimum, not a correct one: NGSF's minima are
+    # sharp whether the redshift is right or wrong, so width is not a quality flag.
     p = tmp_path / "obj_chi2_vs_z.csv"
     p.write_text("Z,CHI2/dof2\n0.050,1.00\n0.051,1.005\n0.052,1.50\n0.100,2.0\n")
     assert ngsf_bridge.chi2_constraint_width(p) == pytest.approx(0.001)
