@@ -52,7 +52,7 @@ python register_analysis_service.py \
   --listener-url http://localhost:7100/analysis/snid_osg \
   --analysis-type spectrum_fitting \
   --input-data-types spectra redshift \
-  --optional-params-json '{"wrapper": ["snid"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest", "docker://ghcr.io/fiorenst/snid-sage"], "spectrum_index": {"type": "number"}, "free_redshift": ["False", "True"], "n_results": {"type": "number", "default": 5}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
+  --optional-params-json '{"wrapper": ["snid"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest", "docker://ghcr.io/fiorenst/snid-sage"], "spectrum_index": {"type": "number"}, "free_redshift": ["False", "True"], "clip_host_lines": ["True", "False"], "n_results": {"type": "number", "default": 5}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
 
 # Already registered (kept here for reference / re-registration):
 #   Fiesta_OSG      -> backend fiesta, /analysis/fiesta_osg

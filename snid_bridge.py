@@ -37,11 +37,22 @@ BAKED_TEMPLATES = Path(os.environ.get("SNID_SAGE_BAKED_TEMPLATES", "/opt/snid_sa
 DEFAULTS = {
     "n_results": 5,
     "fit_timeout": 3600,
+    # Mask host-galaxy emission lines at the source redshift so they do not drive
+    # the classification; only takes effect when a redshift is available.
+    "clip_host_lines": True,
 }
 
 
 def _params(payload: dict) -> dict:
     return {**DEFAULTS, **(payload.get("analysis_parameters") or {})}
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def _read_csv(value) -> list[dict]:
@@ -152,11 +163,17 @@ def _ensure_template_dir(work: Path) -> None:
     os.environ["SNID_SAGE_TEMPLATE_DIR"] = str(tdir)
 
 
-def _run_sage(spectrum: Path, outdir: Path, z: float | None, timeout: int) -> str:
+def _run_sage(
+    spectrum: Path, outdir: Path, z: float | None, timeout: int, clip_host_lines: bool = True
+) -> str:
     """Run ``sage identify`` in --complete mode (writes plots + the .output file)."""
     cmd = [SAGE_BIN, "identify", str(spectrum), "--complete", "--output-dir", str(outdir)]
     if z is not None:
         cmd += ["--forced-redshift", f"{z:.6f}"]
+        # --emclip masks host emission lines at the forced redshift; it is a no-op
+        # without one, so only meaningful alongside --forced-redshift.
+        if clip_host_lines:
+            cmd += ["--emclip"]
     env = {**os.environ, "MPLBACKEND": "Agg"}
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     if proc.returncode != 0:
@@ -270,10 +287,11 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     n_samples = write_spectrum_ascii(row, spectrum)
 
     z = resolve_redshift(payload) if not _params(payload).get("free_redshift") else None
+    clip_host_lines = _as_bool(_params(payload).get("clip_host_lines"), default=True)
     outdir = work / "snid_out"
     outdir.mkdir(parents=True, exist_ok=True)
 
-    stdout = _run_sage(spectrum, outdir, z, timeout)
+    stdout = _run_sage(spectrum, outdir, z, timeout, clip_host_lines)
     summary = parse_summary(stdout)
     matches = parse_template_matches(outdir / f"{stem}.output", n_results)
     plots = _collect_plots(outdir, stem)

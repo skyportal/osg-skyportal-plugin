@@ -161,7 +161,7 @@ def test_read_model_spectrum_missing(tmp_path):
 def test_run_end_to_end_stubbed(tmp_path, monkeypatch):
     # Stub the sage subprocess: emit the summary line + write the .output table
     # and a best-template flux file (for the overlay).
-    def fake_run(spectrum, outdir, z, timeout):
+    def fake_run(spectrum, outdir, z, timeout, clip_host_lines=True):
         stem = spectrum.stem
         (outdir / f"{stem}.output").write_text(OUTPUT_TABLE)
         (outdir / f"{stem}_template_01_flux.dat").write_text("4000 1.0\n5000 2.0\n")
@@ -181,3 +181,36 @@ def test_run_end_to_end_stubbed(tmp_path, monkeypatch):
     assert "II II-flash" in summary and "MatchQual High" in summary
     assert "score 35.3" in summary  # best template HσLAP-CCC
     assert "II" in result["message"]
+
+
+def test_run_sage_clips_host_lines_when_redshift_present(tmp_path, monkeypatch):
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(
+        snid_bridge.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _Proc()
+    )
+    spec, out = tmp_path / "s.dat", tmp_path / "o"
+
+    # A redshift plus clipping on: forced redshift and emission-line clip both go.
+    snid_bridge._run_sage(spec, out, 0.05, 10, clip_host_lines=True)
+    assert "--forced-redshift" in calls[-1] and "--emclip" in calls[-1]
+
+    # Clipping off leaves the lines in.
+    snid_bridge._run_sage(spec, out, 0.05, 10, clip_host_lines=False)
+    assert "--emclip" not in calls[-1]
+
+    # No redshift: nothing to clip against, so no emclip (and no forced redshift).
+    snid_bridge._run_sage(spec, out, None, 10, clip_host_lines=True)
+    assert "--emclip" not in calls[-1] and "--forced-redshift" not in calls[-1]
+
+
+def test_clip_host_lines_defaults_on():
+    assert snid_bridge._params({})["clip_host_lines"] is True
+    assert snid_bridge._as_bool(None, default=True) is True
+    assert snid_bridge._as_bool("False", default=True) is False
+    assert snid_bridge._as_bool("true") is True
