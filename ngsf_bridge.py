@@ -282,8 +282,9 @@ def _sn_type(best: dict | None) -> str | None:
 
 
 def _overlap_fraction(row: dict, lo: float, hi: float) -> float | None:
-    """Fraction of the fitted range [lo, hi] the spectrum spans. NGSF's
-    minimum_overlap gate is on this; below it every chi2 comes back non-finite."""
+    """Fraction of the fitted range [lo, hi] the spectrum spans, as a coarse
+    indicator. NGSF's own gate counts covered points (times/len), so a spectrum
+    with interior gaps can sit below NGSF's threshold while this reads higher."""
     lam = [w for w in _as_floats(row["wavelengths"]) if math.isfinite(w)]
     if not lam or hi <= lo:
         return None
@@ -366,9 +367,10 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         return {
             "status": "failure",
             "message": (
-                "NGSF produced no finite chi-squared: the spectrum covers "
-                f"{overlap_txt} of the fitted range {lo:.0f}-{hi:.0f} A, below "
-                "NGSF's minimum overlap, so no reliable classification is possible"
+                "NGSF produced no finite chi-squared over the fitted range "
+                f"{lo:.0f}-{hi:.0f} A (the spectrum covers about {overlap_txt} of "
+                "it); it does not overlap the range enough to classify, so refit a "
+                "narrower range that the spectrum covers"
             ),
             "results": results,
             "annotations": {},
