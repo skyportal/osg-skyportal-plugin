@@ -24,6 +24,10 @@ import re
 import subprocess
 from pathlib import Path
 
+# A spectrum's wavelengths/fluxes arrive as one big list-repr per CSV cell; lift
+# csv's default 128 KB field cap so large (e.g. NIR) spectra parse.
+csv.field_size_limit(10**9)
+
 # ``sage`` is on PATH in the image; overridable for tests / non-standard installs.
 SAGE_BIN = os.environ.get("SNID_SAGE_BIN", "sage")
 # The image bakes a read-only template bank here; the job runs python directly

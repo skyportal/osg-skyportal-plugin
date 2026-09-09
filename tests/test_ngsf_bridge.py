@@ -207,6 +207,31 @@ def test_read_model_spectrum_ngsf_format(tmp_path):
     assert ngsf_bridge.read_model_spectrum(p) == [[4000.0, 1.05], [4020.0, 0.97]]
 
 
+def test_read_csv_handles_oversized_spectrum_cell():
+    # A high-resolution spectrum's wavelength cell exceeds csv's default 128 KB
+    # field cap; the bridge lifts the limit so it parses instead of raising.
+    n = 15000
+    wl = "[" + ", ".join(f"{4000 + i * 0.5:.4f}" for i in range(n)) + "]"
+    fx = "[" + ", ".join("1.0" for _ in range(n)) + "]"
+    assert len(wl) > 131072
+    payload = _payload(
+        spectra=_csv(
+            [
+                {
+                    "observed_at": "2021-01-01T00:00:00",
+                    "wavelengths": wl,
+                    "fluxes": fx,
+                    "origin": "FIRE",
+                }
+            ],
+            SPECTRA_COLUMNS,
+        )
+    )
+    rows = ngsf_bridge._read_csv(payload["spectra"])
+    assert len(rows) == 1
+    assert len(ngsf_bridge._as_floats(rows[0]["wavelengths"])) == n
+
+
 def test_overlap_fraction():
     # An ordinary optical spectrum short of the fit range: 4000-7220 over 4000-9500.
     assert ngsf_bridge._overlap_fraction({"wavelengths": [4000.0, 7220.0]}, 4000.0, 9500.0) == (

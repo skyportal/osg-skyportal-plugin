@@ -27,6 +27,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# A spectrum's wavelengths/fluxes arrive as one big list-repr per CSV cell; lift
+# csv's default 128 KB field cap so large (e.g. NIR) spectra parse.
+csv.field_size_limit(10**9)
+
 NGSF_DIR = Path(os.environ.get("NGSF_DIR", "/opt/NGSF"))
 NGSF_BANK_DIR = Path(os.environ.get("NGSF_BANK_DIR", "/opt/ngsf-bank"))
 
