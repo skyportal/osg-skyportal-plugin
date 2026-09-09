@@ -225,6 +225,17 @@ def ensure_keepalive(cfg: dict) -> None:
     log(f"submitted held keepalive job (cluster {cluster})")
 
 
+# Default image per wrapper, used only when a request omits singularity_image;
+# the auto-analyses and the UI form both pass it explicitly. Mirrors the
+# register-osg-services form defaults, so keep the two in sync. A wrapper absent
+# here falls back to the single global defaults.singularity_image.
+WRAPPER_DEFAULT_IMAGE = {
+    "ngsf": "/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest",
+    "snid": "/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest",
+    "mosfit": "docker://ashleyvillar/mosfit",
+}
+
+
 def _stage_wrapper_job(
     cfg: dict, params: dict, inputs: dict, cluster_uuid: str
 ) -> tuple[dict, str | None]:
@@ -335,6 +346,12 @@ def _stage_wrapper_job(
     }
     if env_parts:
         overrides["environment"] = '"' + " ".join(env_parts) + '"'
+    # A named wrapper implies a specific image; supply it when the request didn't,
+    # so a bare trigger doesn't fall through to the global default image (which
+    # lacks that backend). Applied after _apply_gpu_and_image, so an explicit
+    # per-request image still wins.
+    if not params.get("singularity_image") and wrapper in WRAPPER_DEFAULT_IMAGE:
+        overrides["+SingularityImage"] = f'"{WRAPPER_DEFAULT_IMAGE[wrapper]}"'
     return overrides, output_url
 
 

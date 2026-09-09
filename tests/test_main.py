@@ -437,6 +437,45 @@ def test_submit_with_wrapper_stages_inputs_and_records_osdf_url(plugin_cfg, tmp_
     assert "use_wrapper" in staged[0].read_text()
 
 
+def test_wrapper_supplies_default_image_when_request_omits_it(
+    plugin_cfg, last_submit_desc, tmp_path, monkeypatch
+):
+    # A bare snid trigger must not fall through to the global default image,
+    # which lacks the sage binary.
+    monkeypatch.chdir(tmp_path)
+    plugin_cfg["staging_dir"] = str(tmp_path / "stg")
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="snid_osg",
+        resource_id="ZTF1",
+        callback_url=None,
+        callback_method="POST",
+        inputs={"analysis_parameters": {"wrapper": "snid"}},
+    )
+    assert last_submit_desc["+SingularityImage"] == f'"{main.WRAPPER_DEFAULT_IMAGE["snid"]}"'
+
+
+def test_explicit_image_overrides_wrapper_default(
+    plugin_cfg, last_submit_desc, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    plugin_cfg["staging_dir"] = str(tmp_path / "stg")
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="snid_osg",
+        resource_id="ZTF1",
+        callback_url=None,
+        callback_method="POST",
+        inputs={
+            "analysis_parameters": {
+                "wrapper": "snid",
+                "singularity_image": "docker://ghcr.io/fiorenst/snid-sage",
+            }
+        },
+    )
+    assert last_submit_desc["+SingularityImage"] == '"docker://ghcr.io/fiorenst/snid-sage"'
+
+
 def test_build_callback_body_prefers_osdf_bundle(plugin_cfg, monkeypatch):
     cid = main.submit_job(
         plugin_cfg,
