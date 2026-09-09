@@ -281,6 +281,16 @@ def _sn_type(best: dict | None) -> str | None:
     return str(best["SN"]).split("/")[0].strip() or None
 
 
+def _overlap_fraction(row: dict, lo: float, hi: float) -> float | None:
+    """Fraction of the fitted range [lo, hi] the spectrum spans. NGSF's
+    minimum_overlap gate is on this; below it every chi2 comes back non-finite."""
+    lam = [w for w in _as_floats(row["wavelengths"]) if math.isfinite(w)]
+    if not lam or hi <= lo:
+        return None
+    covered = min(hi, max(lam)) - max(lo, min(lam))
+    return max(0.0, covered) / (hi - lo)
+
+
 def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir: str = ".") -> dict:
     params = _params(payload)
     n_results = int(params["n_results"])
@@ -326,56 +336,75 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         plot_files += fixed["plot_files"]
 
     # Prefer the catalog-redshift fit for annotations; it is the more trustworthy.
-    headline = passes.get("fixed_z") or passes.get("refit_at_best_z") or passes["free_z"]
-    best = headline["best"]
+    headline = passes.get("fixed_z") or passes.get("refit_at_best_z") or passes.get("free_z")
+    best = headline["best"] if headline else None
+
+    # NGSF still writes a full ranked table when nothing clears its
+    # minimum_overlap gate, but every chi2 is then non-finite (inf/-inf) and the
+    # ranking is meaningless. Treat a non-finite best chi2 as a failed fit so a
+    # spectrum that cannot be fit never becomes a confident annotation.
+    overlap = _overlap_fraction(row, lo, hi)
+    best_chi2 = _to_float(best.get("CHI2/dof")) if best else None
+    fit_ok = best is not None and best_chi2 is not None and math.isfinite(best_chi2)
+
+    results = {
+        "spectrum": {
+            "index": index,
+            "observed_at": row.get("observed_at"),
+            "origin": row.get("origin"),
+            "n_samples": n_samples,
+            "wav_range": [lo, hi],
+            "wav_overlap_fraction": overlap,
+        },
+        "redshift_skyportal": z_skyportal,
+        "fixed_z_skipped_as_duplicate": already_fit,
+        "passes": passes,
+    }
+
+    if not fit_ok:
+        overlap_txt = f"{overlap:.0%}" if overlap is not None else "unknown"
+        return {
+            "status": "failure",
+            "message": (
+                "NGSF produced no finite chi-squared: the spectrum covers "
+                f"{overlap_txt} of the fitted range {lo:.0f}-{hi:.0f} A, below "
+                "NGSF's minimum overlap, so no reliable classification is possible"
+            ),
+            "results": results,
+            "annotations": {},
+            "model_spectrum": None,
+            "model_spectrum_summary": None,
+            "plot_files": [],
+        }
+
     model_spectrum = headline.get("model_spectrum")
 
     # Classification headline for the overlay hover (type/z/chi2/host).
-    model_spectrum_summary = None
-    if best:
-        bits = [t for t in [_sn_type(best)] if t]
-        z_best = _to_float(best.get("Z"))
-        if z_best is not None:
-            bits.append(f"z={z_best:.4f}")
-        chi2 = _to_float(best.get("CHI2/dof"))
-        if chi2 is not None:
-            bits.append(f"chi2/dof {chi2:.2f}")
-        if best.get("GALAXY"):
-            bits.append(f"host {best['GALAXY']}")
-        model_spectrum_summary = " · ".join(bits) or None
-    annotations = {}
-    if best:
-        annotations = {
-            "ngsf_classification": _sn_type(best),
-            "ngsf_redshift": _to_float(best.get("Z")),
-            "ngsf_chi2_dof": _to_float(best.get("CHI2/dof")),
-            "ngsf_host_galaxy": best.get("GALAXY"),
-            "ngsf_phase": _to_float(best.get("Phase")),
-        }
-        annotations = {k: v for k, v in annotations.items() if v is not None}
+    bits = [t for t in [_sn_type(best)] if t]
+    z_best = _to_float(best.get("Z"))
+    if z_best is not None:
+        bits.append(f"z={z_best:.4f}")
+    bits.append(f"chi2/dof {best_chi2:.2f}")
+    if best.get("GALAXY"):
+        bits.append(f"host {best['GALAXY']}")
+    model_spectrum_summary = " · ".join(bits) or None
 
-    message = "NGSF produced no ranked match"
-    if best:
-        message = (
-            f"NGSF matched {_sn_type(best)} at z={_to_float(best.get('Z')):.4f} "
-            f"(chi2/dof={_to_float(best.get('CHI2/dof')):.3f})"
-        )
+    annotations = {
+        "ngsf_classification": _sn_type(best),
+        "ngsf_redshift": z_best,
+        "ngsf_chi2_dof": best_chi2,
+        "ngsf_host_galaxy": best.get("GALAXY"),
+        "ngsf_phase": _to_float(best.get("Phase")),
+    }
+    annotations = {k: v for k, v in annotations.items() if v is not None}
+
+    z_txt = f"{z_best:.4f}" if z_best is not None else "unknown"
+    message = f"NGSF matched {_sn_type(best)} at z={z_txt} (chi2/dof={best_chi2:.3f})"
 
     return {
         "status": "success",
         "message": message,
-        "results": {
-            "spectrum": {
-                "index": index,
-                "observed_at": row.get("observed_at"),
-                "origin": row.get("origin"),
-                "n_samples": n_samples,
-                "wav_range": [lo, hi],
-            },
-            "redshift_skyportal": z_skyportal,
-            "fixed_z_skipped_as_duplicate": already_fit,
-            "passes": passes,
-        },
+        "results": results,
         "annotations": annotations,
         "model_spectrum": model_spectrum,
         "model_spectrum_summary": model_spectrum_summary,

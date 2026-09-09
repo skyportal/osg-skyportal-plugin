@@ -205,3 +205,46 @@ def test_read_model_spectrum_ngsf_format(tmp_path):
     p = tmp_path / "s_ngsf0_model.txt"
     p.write_text("# wavelength(A) model_flux\n4000 1.05\n4010 nan\n4020 0.97\n")
     assert ngsf_bridge.read_model_spectrum(p) == [[4000.0, 1.05], [4020.0, 0.97]]
+
+
+def test_overlap_fraction():
+    # An ordinary optical spectrum short of the fit range: 4000-7220 over 4000-9500.
+    assert ngsf_bridge._overlap_fraction({"wavelengths": [4000.0, 7220.0]}, 4000.0, 9500.0) == (
+        pytest.approx((7220 - 4000) / (9500 - 4000))
+    )
+    assert ngsf_bridge._overlap_fraction({"wavelengths": [3000.0, 11000.0]}, 4000.0, 9500.0) == 1.0
+    # Disjoint from the fit range clamps to zero, not a negative fraction.
+    assert ngsf_bridge._overlap_fraction({"wavelengths": [5000.0, 5010.0]}, 5900.0, 10000.0) == 0.0
+    assert ngsf_bridge._overlap_fraction({"wavelengths": [1.0]}, 5.0, 5.0) is None
+
+
+def _inf_collect(*_args, **_kwargs):
+    # What NGSF writes when nothing clears minimum_overlap: a ranked-looking table
+    # whose every chi2 is non-finite, arbitrarily ordered.
+    best = {
+        "SPECTRUM": "s",
+        "GALAXY": "Sb",
+        "SN": "IIb-flash/2013cu_early/phase-band : 0.0",
+        "Z": 0.0,
+        "Phase": 0.0,
+        "CHI2/dof": float("-inf"),
+    }
+    return {"rows": [best], "best": best, "plot_files": [], "model_spectrum": [[5000.0, 1.0]]}
+
+
+def test_non_finite_chi2_is_reported_as_failure(tmp_path, monkeypatch):
+    # The default payload's most-recent spectrum (NGPS, 5000-5010 A) does not
+    # overlap the NGPS fit range (5900-10000 A), so NGSF cannot fit it.
+    monkeypatch.setattr(ngsf_bridge, "_prepare_tree", lambda *a, **k: tmp_path / "NGSF")
+    monkeypatch.setattr(ngsf_bridge, "_run_ngsf", lambda *a, **k: None)
+    monkeypatch.setattr(ngsf_bridge, "_collect", _inf_collect)
+
+    result = ngsf_bridge.run_from_skyportal_inputs(
+        _payload(), resource_id="obj", work_dir=str(tmp_path)
+    )
+
+    assert result["status"] == "failure"
+    assert "finite" in result["message"]
+    assert result["annotations"] == {}
+    assert result["model_spectrum"] is None
+    assert result["results"]["spectrum"]["wav_overlap_fraction"] == 0.0
