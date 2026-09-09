@@ -239,6 +239,27 @@ def read_model_spectrum(path: Path, max_points: int = 3000) -> list | None:
     return pts
 
 
+def chi2_constraint_width(path: Path) -> float | None:
+    """Width in z of the near-minimum region of NGSF's chi2(z) profile
+    (``<stem>_chi2_vs_z.csv``): max minus min Z over the grid steps within 1% of
+    the best reduced chi2. A shape measure of how pinned-down the redshift is,
+    not a calibrated error. None when the profile is absent or has no shape (a
+    fixed-z run writes a single row)."""
+    if not path.exists():
+        return None
+    rows = []
+    for row in csv.DictReader(path.open()):
+        z, c = _to_float(row.get("Z")), _to_float(row.get("CHI2/dof2"))
+        if z is not None and c is not None:
+            rows.append((z, c))
+    finite = [(z, c) for z, c in rows if math.isfinite(c)]
+    if len(rows) < 2 or len(finite) < 2:
+        return None
+    best = min(c for _, c in finite)
+    near = [z for z, c in finite if c <= best * 1.01]
+    return max(near) - min(near)
+
+
 def _collect(tree: Path, stem: str, free_z: bool, n_results: int) -> dict:
     """Read one pass's results CSV and its ranked fit plots."""
     out_dir = tree / ("fit_results" if free_z else "fit_results_z")
@@ -267,6 +288,7 @@ def _collect(tree: Path, stem: str, free_z: bool, n_results: int) -> dict:
         "best": top[0] if top else None,
         "plot_files": plots,
         "model_spectrum": model_spectrum,
+        "chi2_z_width": chi2_constraint_width(out_dir / f"{stem}_chi2_vs_z.csv"),
     }
 
 
@@ -352,6 +374,11 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     best_chi2 = _to_float(best.get("CHI2/dof")) if best else None
     fit_ok = best is not None and best_chi2 is not None and math.isfinite(best_chi2)
 
+    # How tightly the scan's chi2(z) profile constrains z (width of the near-min
+    # region). Comes from the free-z scan; the fixed-z pass is a single point.
+    # A shape measure, not a calibrated error, so surface it under a plain name.
+    chi2_width = (passes.get("free_z") or {}).get("chi2_z_width")
+
     results = {
         "spectrum": {
             "index": index,
@@ -363,6 +390,7 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         },
         "redshift_skyportal": z_skyportal,
         "fixed_z_skipped_as_duplicate": already_fit,
+        "chi2_constraint_width": chi2_width,
         "passes": passes,
     }
 
@@ -401,6 +429,7 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         "ngsf_chi2_dof": best_chi2,
         "ngsf_host_galaxy": best.get("GALAXY"),
         "ngsf_phase": _to_float(best.get("Phase")),
+        "ngsf_chi2_constraint_width": chi2_width,
     }
     annotations = {k: v for k, v in annotations.items() if v is not None}
 

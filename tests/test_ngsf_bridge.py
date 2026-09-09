@@ -243,6 +243,32 @@ def test_overlap_fraction():
     assert ngsf_bridge._overlap_fraction({"wavelengths": [1.0]}, 5.0, 5.0) is None
 
 
+def test_chi2_constraint_width_pinned(tmp_path):
+    # Only the two grid steps at the minimum sit within 1% of the best chi2.
+    p = tmp_path / "obj_chi2_vs_z.csv"
+    p.write_text("Z,CHI2/dof2\n0.050,1.00\n0.051,1.005\n0.052,1.50\n0.100,2.0\n")
+    assert ngsf_bridge.chi2_constraint_width(p) == pytest.approx(0.001)
+
+
+def test_chi2_constraint_width_unconstrained(tmp_path):
+    # A flat surface: near-min region spans a wide redshift range.
+    p = tmp_path / "obj_chi2_vs_z.csv"
+    p.write_text("Z,CHI2/dof2\n0.00,1.00\n0.05,1.008\n0.13,1.009\n0.20,2.0\n")
+    assert ngsf_bridge.chi2_constraint_width(p) == pytest.approx(0.13)
+
+
+def test_chi2_constraint_width_absent_or_shapeless(tmp_path):
+    assert ngsf_bridge.chi2_constraint_width(tmp_path / "nope.csv") is None
+    # A fixed-z run writes a single row: correct, but no shape to measure.
+    single = tmp_path / "single_chi2_vs_z.csv"
+    single.write_text("Z,CHI2/dof2\n0.086,1.2\n")
+    assert ngsf_bridge.chi2_constraint_width(single) is None
+    # Nothing cleared minimum_overlap: every chi2 non-finite.
+    allinf = tmp_path / "inf_chi2_vs_z.csv"
+    allinf.write_text("Z,CHI2/dof2\n0.0,inf\n0.1,inf\n")
+    assert ngsf_bridge.chi2_constraint_width(allinf) is None
+
+
 def _inf_collect(*_args, **_kwargs):
     # What NGSF writes when nothing clears minimum_overlap: a ranked-looking table
     # whose every chi2 is non-finite, arbitrarily ordered.
