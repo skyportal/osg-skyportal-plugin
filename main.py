@@ -231,7 +231,11 @@ def ensure_keepalive(cfg: dict) -> None:
 # here falls back to the single global defaults.singularity_image.
 WRAPPER_DEFAULT_IMAGE = {
     "ngsf": "/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest",
-    "snid": "/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest",
+    # docker:// not CVMFS: SNID needs its venv (/opt/venv/bin) on PATH, which the
+    # docker image's env applies but the CVMFS sandbox invocation does not, so
+    # `sage` is not found from the CVMFS copy. NGSF runs python off the base PATH,
+    # so its CVMFS image is fine.
+    "snid": "docker://ghcr.io/fiorenst/snid-sage",
     "mosfit": "docker://ashleyvillar/mosfit",
 }
 
