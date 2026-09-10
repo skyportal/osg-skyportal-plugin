@@ -177,8 +177,13 @@ def _run_sage(
     env = {**os.environ, "MPLBACKEND": "Agg"}
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     if proc.returncode != 0:
-        # sage writes the real reason (e.g. "No good matches found") to stdout and
-        # only a version-update banner to stderr, so include both or the failure
+        # A "no good matches" exit is a non-detection, not an error: clipping host
+        # lines can remove a line-driven match and leave nothing, so return the
+        # output and let the caller report a clean "no confident classification".
+        if "No good matches found" in (proc.stdout or ""):
+            return proc.stdout
+        # Real errors (bad spectrum, missing templates): sage writes the reason to
+        # stdout and only a version-update banner to stderr, so include both or the
         # message is just the banner.
         both = "\n".join(s.strip() for s in (proc.stdout, proc.stderr) if s and s.strip())
         raise RuntimeError(f"sage identify exited {proc.returncode}:\n{both[-1500:]}")

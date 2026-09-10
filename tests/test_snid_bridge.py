@@ -217,11 +217,11 @@ def test_clip_host_lines_defaults_on():
 
 
 def test_run_sage_failure_surfaces_stdout_not_just_banner(tmp_path, monkeypatch):
-    # sage puts the real reason on stdout and only an update banner on stderr;
-    # the failure message must carry the reason, not just the banner.
+    # A real error: sage puts the reason on stdout and only an update banner on
+    # stderr; the failure message must carry the reason, not just the banner.
     class _Proc:
         returncode = 2
-        stdout = "ZTF26x: No good matches found\nSuggestions: ..."
+        stdout = "[ERROR] Input spectrum has invalid wavelength bounds"
         stderr = "Update available: 0.0.0.dev0+14500a7 -> 1.2.3."
 
     monkeypatch.setattr(snid_bridge.subprocess, "run", lambda cmd, **kw: _Proc())
@@ -229,4 +229,18 @@ def test_run_sage_failure_surfaces_stdout_not_just_banner(tmp_path, monkeypatch)
         snid_bridge._run_sage(tmp_path / "s.dat", tmp_path / "o", 0.05, 10)
     msg = str(ei.value)
     assert "exited 2" in msg
-    assert "No good matches found" in msg
+    assert "invalid wavelength bounds" in msg
+
+
+def test_run_sage_no_good_matches_is_not_a_failure(tmp_path, monkeypatch):
+    # Clipping can leave a spectrum with no line-driven match; that non-detection
+    # returns cleanly (no raise) so the caller reports "no confident classification".
+    class _Proc:
+        returncode = 2
+        stdout = "ZTF26x: No good matches found\nSuggestions: ..."
+        stderr = "Update available: 0.0.0.dev0+14500a7 -> 1.2.3."
+
+    monkeypatch.setattr(snid_bridge.subprocess, "run", lambda cmd, **kw: _Proc())
+    out = snid_bridge._run_sage(tmp_path / "s.dat", tmp_path / "o", 0.05, 10)
+    assert "No good matches found" in out
+    assert snid_bridge.parse_summary(out) == {}  # -> "no confident classification"
