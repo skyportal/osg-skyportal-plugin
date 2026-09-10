@@ -177,8 +177,11 @@ def _run_sage(
     env = {**os.environ, "MPLBACKEND": "Agg"}
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip()[-1500:]
-        raise RuntimeError(f"sage identify exited {proc.returncode}:\n{tail}")
+        # sage writes the real reason (e.g. "No good matches found") to stdout and
+        # only a version-update banner to stderr, so include both or the failure
+        # message is just the banner.
+        both = "\n".join(s.strip() for s in (proc.stdout, proc.stderr) if s and s.strip())
+        raise RuntimeError(f"sage identify exited {proc.returncode}:\n{both[-1500:]}")
     return proc.stdout
 
 

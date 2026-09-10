@@ -214,3 +214,19 @@ def test_clip_host_lines_defaults_on():
     assert snid_bridge._as_bool(None, default=True) is True
     assert snid_bridge._as_bool("False", default=True) is False
     assert snid_bridge._as_bool("true") is True
+
+
+def test_run_sage_failure_surfaces_stdout_not_just_banner(tmp_path, monkeypatch):
+    # sage puts the real reason on stdout and only an update banner on stderr;
+    # the failure message must carry the reason, not just the banner.
+    class _Proc:
+        returncode = 2
+        stdout = "ZTF26x: No good matches found\nSuggestions: ..."
+        stderr = "Update available: 0.0.0.dev0+14500a7 -> 1.2.3."
+
+    monkeypatch.setattr(snid_bridge.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(RuntimeError) as ei:
+        snid_bridge._run_sage(tmp_path / "s.dat", tmp_path / "o", 0.05, 10)
+    msg = str(ei.value)
+    assert "exited 2" in msg
+    assert "No good matches found" in msg
