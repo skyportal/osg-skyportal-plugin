@@ -299,6 +299,14 @@ def _stage_wrapper_job(
             (plugin_dir / "snid_wrapper.py").resolve(),
             (plugin_dir / "snid_bridge.py").resolve(),
         ]
+    elif wrapper == "alma":
+        # Reuses the fiesta image: the reduction needs only astropy, numpy and
+        # matplotlib, all of which fiestaem already pulls in.
+        wrapper_name = "alma_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "alma_wrapper.py").resolve(),
+            (plugin_dir / "alma_bridge.py").resolve(),
+        ]
     else:
         wrapper_name = "fiesta_wrapper.py"
         wrapper_files = [
@@ -327,12 +335,29 @@ def _stage_wrapper_job(
     inputs_json = job_dir / "inputs.json"
     transfer = [str(f) for f in wrapper_files] + [str(inputs_json)]
 
+    # ALMA products are fetched here, not on the worker: the execute node is not
+    # assumed to reach the archive. Only the delivered products travel, which is
+    # tens of MB rather than the raw ASDM's hundreds.
+    if wrapper == "alma":
+        import alma_staging
+
+        alma_cfg = cfg.get("alma") or {}
+        staged, notes = alma_staging.stage(
+            inputs,
+            job_dir / "alma",
+            max_bytes=int(alma_cfg.get("max_stage_bytes", alma_staging.DEFAULT_MAX_BYTES)),
+            include_auxiliary=bool(alma_cfg.get("include_auxiliary", False)),
+        )
+        for note in notes:
+            log(f"alma staging: {note}")
+        transfer += [str(path) for path in staged]
+
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
     # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).
     # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under
     # its basename; populate it out-of-band.
     jax_cache_dir = cfg.get("jax_cache_dir")
-    if wrapper not in ("periodfind", "mosfit", "pygrb", "ngsf", "snid") and jax_cache_dir:
+    if wrapper not in ("periodfind", "mosfit", "pygrb", "ngsf", "snid", "alma") and jax_cache_dir:
         cache_path = Path(jax_cache_dir).resolve()
         if cache_path.is_dir() and any(cache_path.iterdir()):
             transfer.append(str(cache_path))

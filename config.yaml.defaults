@@ -97,6 +97,16 @@ services:
                     # token is shipped to the wrapper as BEARER_TOKEN_FILE.
                     read_token_path: ~/.condor/tokens.d/osdf-read.use
                     write_token_path: ~/.condor/tokens.d/osdf-write.use
+                alma:
+                    # ALMA's delivered products are fetched on this host and shipped
+                    # with the job, since the execute node is not assumed to reach
+                    # the archive.
+                    # A ceiling per job, so one pathological dataset cannot wedge
+                    # the submit host or the transfer.
+                    max_stage_bytes: 2147483648   # 2 GiB
+                    # The delivered products alone are enough for a spectrum and a
+                    # moment map; auxiliary adds calibration tables and the weblog.
+                    include_auxiliary: false
                 # Per-job scratch dir (inputs.json, etc.). Created on demand.
                 staging_dir: staging
                 auth:

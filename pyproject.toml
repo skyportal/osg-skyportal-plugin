@@ -12,6 +12,10 @@ dependencies = [
   "tornado>=6.4",
   "pyyaml>=6.0",
   "requests>=2.32",
+  # The ALMA path fetches products on the submit host. Not an extra: a missing
+  # astroquery would surface as an obscure staging note and then a job failing
+  # for want of cubes, rather than as the install problem it is.
+  "astroquery>=0.4.11",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +26,9 @@ osg = ["htcondor>=24.0"]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",
+  # Exercises the ALMA bridge's plot_reduction in tests; the fiesta runtime image
+  # already ships it, so it is a test dep here, not a submit-host runtime one.
+  "matplotlib>=3.7",
 ]
 
 [tool.compatibility]

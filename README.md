@@ -33,9 +33,31 @@ point, polls it, and POSTs the result back to SkyPortal's callback.
 
 Now "Run analysis" on a SkyPortal source triggers a fit on OSG.
 
+### ALMA cube reduction
+
+Extracts a spectrum at the source position and a moment-0 map from ALMA's
+*delivered* products. Register it against the `annotations` input, which is
+where SkyPortal's `alma_archive` service records the datasets covering the
+source; a request then needs no parameters of its own.
+
+```bash
+uv run python register_analysis_service.py \
+    --name alma_osg \
+    --display "ALMA cubes (OSG)" \
+    --listener-url http://<plugin-host>:7100/analysis/alma_osg \
+    --input-data-types annotations \
+    --optional-params-json '{"aperture_arcsec": ["1.0"], "max_cubes": ["3"]}' \
+    --group-ids 1
+```
+
+The products are downloaded here and transferred in with the job — the execute
+node is not assumed to reach the archive — so it reuses the fiesta image rather
+than needing one of its own. Only the delivered products travel (tens of MB);
+re-imaging from the raw ASDM would need CASA and is out of scope.
+
 ## How it works
 
-- Submits a wrapper job (`fiesta_wrapper.py` + `fiesta_bridge.py`) to the OSG AP.
+- Submits a wrapper job (e.g. `fiesta_wrapper.py` + `fiesta_bridge.py`) to the OSG AP.
   Set `batch.enabled` to coalesce many requests into one submit (itemdata).
 - An async poller tracks jobs via `condor_q`/`condor_history` and POSTs the
   result (model light curves + posteriors) back to `callback_url`.
