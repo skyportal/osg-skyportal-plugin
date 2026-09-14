@@ -255,6 +255,7 @@ def _stage_wrapper_job(
         "pygrb",
         "ngsf",
         "snid",
+        "alma",
     ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
         return {}, None
@@ -1107,7 +1108,17 @@ class AnalysisHandler(tornado.web.RequestHandler):
         # into one itemdata RPC; the job's result — success or submit failure —
         # comes back via the callback. Responding now means the request never
         # blocks on the (possibly long) batch window or a slow submit.
-        if (self.cfg.get("batch") or {}).get("enabled", False) and _BATCH_QUEUE is not None:
+        wrapper_name = (
+            str((data["inputs"].get("analysis_parameters") or {}).get("wrapper", ""))
+            .strip()
+            .lower()
+        )
+        batchable = wrapper_name != "alma"
+        if (
+            batchable
+            and (self.cfg.get("batch") or {}).get("enabled", False)
+            and _BATCH_QUEUE is not None
+        ):
             await _BATCH_QUEUE.put(
                 {
                     "analysis_name": analysis_name,
