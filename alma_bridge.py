@@ -91,6 +91,43 @@ def _spectral_axis(header, n_planes):
     return list(range(n_planes)), "channel"
 
 
+def beam_pixels(header, pixel_scale_deg):
+    """Pixels per synthesised beam, or None if the header does not carry one.
+
+    Interferometric maps are in Jy/beam, so converting a sum of pixels into a
+    flux density needs the beam's area: pi/(4 ln2) x BMAJ x BMIN for a Gaussian.
+    """
+    try:
+        bmaj = float(header.get("BMAJ") or 0.0)
+        bmin = float(header.get("BMIN") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if bmaj <= 0 or bmin <= 0 or pixel_scale_deg <= 0:
+        return None
+    area_deg2 = math.pi * bmaj * bmin / (4 * math.log(2))
+    return area_deg2 / (pixel_scale_deg**2)
+
+
+def robust_rms(values, clip=3.0, iterations=3):
+    """Sigma-clipped standard deviation, so a source cannot inflate the noise."""
+    import numpy as np
+
+    data = np.asarray([v for v in values if v == v], dtype="float64")
+    if data.size == 0:
+        return None
+    for _ in range(iterations):
+        if data.size < 8:
+            break
+        centre, spread = np.median(data), np.std(data)
+        if spread == 0:
+            break
+        kept = data[np.abs(data - centre) <= clip * spread]
+        if kept.size == data.size:
+            break
+        data = kept
+    return float(np.std(data)) if data.size else None
+
+
 def _aperture(shape, centre, radius_px):
     """Pixel offsets within `radius_px` of centre, clipped to the plane."""
     ny, nx = shape
@@ -105,7 +142,13 @@ def _aperture(shape, centre, radius_px):
     return pixels
 
 
-def reduce_cube(path: Path, ra: float, dec: float, radius_arcsec: float = 1.0) -> dict:
+def reduce_cube(
+    path: Path,
+    ra: float,
+    dec: float,
+    radius_arcsec: float = 1.0,
+    snr_threshold: float = 3.0,
+) -> dict:
     """Spectrum at the source position and a moment-0 map, from one cube."""
     import numpy as np
     from astropy.io import fits
@@ -127,23 +170,49 @@ def reduce_cube(path: Path, ra: float, dec: float, radius_arcsec: float = 1.0) -
         n_planes = data.shape[0]
 
         celestial = wcs.celestial
-        x, y = celestial.world_to_pixel_values(ra, dec)
+        x, y = (float(v) for v in celestial.world_to_pixel_values(ra, dec))
         if not (math.isfinite(x) and math.isfinite(y)):
             raise ValueError("source position does not land on this cube")
 
         scale = abs(float(celestial.wcs.cdelt[0])) * 3600.0 or 1.0
         radius_px = max(radius_arcsec / scale, 1.0)
-        pixels = _aperture(data.shape[1:], (float(x), float(y)), radius_px)
+        pixels = _aperture(data.shape[1:], (x, y), radius_px)
         if not pixels:
             raise ValueError("source position falls outside this cube")
 
+        pixel_scale_deg = abs(float(celestial.wcs.cdelt[0]))
+        per_beam = beam_pixels(header, pixel_scale_deg)
+
+        # Noise is measured well away from the source, so a detection cannot
+        # inflate it; the same mask serves every plane.
+        ny, nx = data.shape[1:]
+        yy, xx = np.mgrid[0:ny, 0:nx]
+        off_source = ((xx - x) ** 2 + (yy - y) ** 2) > (5 * radius_px) ** 2
+        source_pixel = (
+            min(max(int(round(y)), 0), ny - 1),
+            min(max(int(round(x)), 0), nx - 1),
+        )
+
         # A plane at a time: a cube can be much larger than the slot's memory.
-        spectrum, moment0 = [], np.zeros(data.shape[1:], dtype="float64")
+        spectrum, peaks, integrated, noises = [], [], [], []
+        moment0 = np.zeros(data.shape[1:], dtype="float64")
         for index in range(n_planes):
             plane = np.asarray(data[index], dtype="float64")
             finite = np.where(np.isfinite(plane), plane, 0.0)
             moment0 += finite
-            spectrum.append(float(np.mean([finite[j, i] for j, i in pixels])))
+            in_aperture = np.array([finite[j, i] for j, i in pixels])
+            # Mean surface brightness, kept for the line profile's shape.
+            spectrum.append(float(in_aperture.mean()))
+            # Measured at the source position, not as a maximum over the
+            # aperture: the largest of ~N noise pixels sits near 3 sigma for any
+            # realistic N, which would make an empty field look like a
+            # detection. For a point source this value in Jy/beam is the flux
+            # density. The summed aperture over the beam area is the flux
+            # *within the aperture*, which needs an aperture correction to be a
+            # total flux.
+            peaks.append(float(finite[source_pixel]))
+            integrated.append(float(in_aperture.sum() / per_beam) if per_beam else None)
+            noises.append(robust_rms(plane[off_source]))
 
     frequencies, unit = _spectral_axis(header, n_planes)
     return {
@@ -152,11 +221,45 @@ def reduce_cube(path: Path, ra: float, dec: float, radius_arcsec: float = 1.0) -
         "spectral_unit": unit,
         "frequencies": frequencies,
         "spectrum": spectrum,
+        "peak_per_beam": peaks,
+        "integrated_flux": integrated,
+        "rms_per_beam": noises,
+        "beam_pixels": per_beam,
+        "beam_arcsec": (
+            [float(header["BMAJ"]) * 3600.0, float(header["BMIN"]) * 3600.0] if per_beam else None
+        ),
+        "photometry": _photometry(peaks, integrated, noises, snr_threshold),
         "aperture_arcsec": radius_arcsec,
         "aperture_pixels": len(pixels),
         "bunit": str(header.get("BUNIT", "")).strip() or None,
         "moment0": moment0,
-        "position": {"ra": ra, "dec": dec, "x": float(x), "y": float(y)},
+        "position": {"ra": ra, "dec": dec, "x": x, "y": y},
+    }
+
+
+def _photometry(peaks, integrated, noises, snr_threshold):
+    """The brightest plane's measurement, or an upper limit if nothing is there.
+
+    Reporting a limit rather than a flux is the honest answer for a
+    non-detection, and is what a submm follow-up usually yields.
+    """
+    usable = [i for i, p in enumerate(peaks) if p == p]
+    if not usable:
+        return None
+    best = max(usable, key=lambda i: peaks[i])
+    peak, rms = peaks[best], noises[best]
+    snr = (peak / rms) if rms else None
+    detected = bool(snr is not None and snr >= snr_threshold)
+    return {
+        "plane": best,
+        "detected": detected,
+        "snr": snr,
+        "rms_per_beam": rms,
+        "peak_per_beam": peak if detected else None,
+        "integrated_flux": integrated[best] if detected else None,
+        # A limit is only meaningful when the noise could be measured.
+        "upper_limit_per_beam": (None if detected or rms is None else snr_threshold * rms),
+        "snr_threshold": snr_threshold,
     }
 
 
@@ -215,6 +318,10 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         max_cubes = int(params.get("max_cubes", 3))
     except (TypeError, ValueError):
         max_cubes = 3
+    try:
+        snr_threshold = float(params.get("snr_threshold", 3.0))
+    except (TypeError, ValueError):
+        snr_threshold = 3.0
 
     ra, dec = source_position(payload)
     if ra is None or dec is None:
@@ -230,7 +337,13 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     reductions, plot_files, failures = [], [], []
     for cube in cubes[:max_cubes]:
         try:
-            reduction = reduce_cube(cube, ra, dec, radius_arcsec=radius_arcsec)
+            reduction = reduce_cube(
+                cube,
+                ra,
+                dec,
+                radius_arcsec=radius_arcsec,
+                snr_threshold=snr_threshold,
+            )
         except Exception as e:  # noqa: BLE001 -- one bad cube must not lose the rest
             failures.append(f"{cube.name}: {e}")
             continue
@@ -258,8 +371,30 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
             "skipped": failures,
         },
         "plot_files": plot_files,
-        "annotations": {
-            "n_cubes": len(reductions),
-            "aperture_arcsec": radius_arcsec,
-        },
+        "annotations": _summary_annotations(reductions, radius_arcsec),
     }
+
+
+def _summary_annotations(reductions, radius_arcsec):
+    """The headline numbers, so a scanner sees them without opening the results."""
+    annotations = {
+        "n_cubes": len(reductions),
+        "aperture_arcsec": radius_arcsec,
+    }
+    measured = [r["photometry"] for r in reductions if r.get("photometry")]
+    detections = [p for p in measured if p["detected"]]
+    if detections:
+        best = max(detections, key=lambda p: p["snr"])
+        annotations["detected"] = True
+        annotations["peak_mJy_per_beam"] = round(best["peak_per_beam"] * 1e3, 4)
+        annotations["snr"] = round(best["snr"], 2)
+        if best["integrated_flux"] is not None:
+            annotations["integrated_mJy"] = round(best["integrated_flux"] * 1e3, 4)
+    elif measured:
+        limits = [p["upper_limit_per_beam"] for p in measured if p["upper_limit_per_beam"]]
+        annotations["detected"] = False
+        if limits:
+            # The deepest limit is the most informative one.
+            annotations["upper_limit_mJy_per_beam"] = round(min(limits) * 1e3, 4)
+            annotations["snr_threshold"] = measured[0]["snr_threshold"]
+    return annotations

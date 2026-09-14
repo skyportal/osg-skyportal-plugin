@@ -130,3 +130,112 @@ def test_tar_members_escaping_the_directory_are_refused(tmp_path):
 
     alma_bridge.extract_tarballs(tmp_path)
     assert victim.read_bytes() == b"original"
+
+
+# --- photometry ------------------------------------------------------------
+
+FLUX_JY = 6.9e-3  # a submm afterglow's flux density, in Jy
+NOISE_JY = 2.3e-4
+BEAM_DEG = 3.0 / 3600.0  # 3" synthesised beam
+PIX_DEG = 0.2 / 3600.0
+
+
+def _continuum_map(tmp_path, flux_jy, seed=1):
+    """A single-plane map: a beam-shaped source on noise, as submm continuum is."""
+    import math
+
+    ny = nx = 128
+    cy = cx = 64
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    sigma_px = (BEAM_DEG / PIX_DEG) / (2 * math.sqrt(2 * math.log(2)))
+    image = flux_jy * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma_px**2)))
+    image = image + np.random.default_rng(seed).normal(0, NOISE_JY, image.shape)
+
+    header = fits.Header()
+    header["NAXIS"] = 2
+    header["CTYPE1"], header["CRVAL1"] = "RA---SIN", RA
+    header["CDELT1"], header["CRPIX1"] = -PIX_DEG, cx + 1
+    header["CTYPE2"], header["CRVAL2"] = "DEC--SIN", DEC
+    header["CDELT2"], header["CRPIX2"] = PIX_DEG, cy + 1
+    header["BUNIT"] = "Jy/beam"
+    header["BMAJ"] = header["BMIN"] = BEAM_DEG
+    header["BPA"] = 0.0
+    path = tmp_path / "cont.image.fits"
+    fits.writeto(path, image.astype("float32"), header, overwrite=True)
+    return path
+
+
+def test_beam_is_read_from_the_header(tmp_path):
+    result = alma_bridge.reduce_cube(_continuum_map(tmp_path, FLUX_JY), RA, DEC, radius_arcsec=3.0)
+    assert result["beam_arcsec"][0] == pytest.approx(3.0, abs=0.01)
+    # pi/(4 ln2) * BMAJ * BMIN / pixel area
+    assert result["beam_pixels"] == pytest.approx(254.9, rel=0.01)
+
+
+def test_peak_recovers_the_flux_density(tmp_path):
+    """For a point source the peak in Jy/beam is the flux density."""
+    result = alma_bridge.reduce_cube(_continuum_map(tmp_path, FLUX_JY), RA, DEC, radius_arcsec=3.0)
+    photometry = result["photometry"]
+    assert photometry["detected"] is True
+    # The peak pixel is biased high by noise, so allow a few sigma.
+    assert photometry["peak_per_beam"] == pytest.approx(FLUX_JY, abs=5 * NOISE_JY)
+
+
+def test_rms_is_measured_off_source(tmp_path):
+    """A bright source must not inflate the noise estimate."""
+    result = alma_bridge.reduce_cube(_continuum_map(tmp_path, FLUX_JY), RA, DEC, radius_arcsec=3.0)
+    assert result["photometry"]["rms_per_beam"] == pytest.approx(NOISE_JY, rel=0.1)
+
+
+def test_integrated_flux_is_the_flux_inside_the_aperture(tmp_path):
+    """Not a total flux: a 3" aperture on a 3" beam encloses ~94% of a Gaussian."""
+    import math
+
+    result = alma_bridge.reduce_cube(_continuum_map(tmp_path, FLUX_JY), RA, DEC, radius_arcsec=3.0)
+    sigma_arcsec = 3.0 / (2 * math.sqrt(2 * math.log(2)))
+    enclosed = 1 - math.exp(-(3.0**2) / (2 * sigma_arcsec**2))
+    assert result["photometry"]["integrated_flux"] == pytest.approx(FLUX_JY * enclosed, rel=0.05)
+
+
+def test_a_non_detection_yields_an_upper_limit(tmp_path):
+    """The usual submm follow-up result: a limit, not a flux."""
+    result = alma_bridge.reduce_cube(_continuum_map(tmp_path, 0.0), RA, DEC, radius_arcsec=3.0)
+    photometry = result["photometry"]
+    assert photometry["detected"] is False
+    assert photometry["peak_per_beam"] is None
+    assert photometry["integrated_flux"] is None
+    assert photometry["upper_limit_per_beam"] == pytest.approx(
+        3 * photometry["rms_per_beam"], rel=1e-6
+    )
+
+
+def test_a_map_without_a_beam_reports_no_flux(tmp_path):
+    """Jy/beam cannot become Jy without the beam, so it is not guessed."""
+    path = _continuum_map(tmp_path, FLUX_JY)
+    with fits.open(path, mode="update") as hdul:
+        del hdul[0].header["BMAJ"]
+        del hdul[0].header["BMIN"]
+    result = alma_bridge.reduce_cube(path, RA, DEC, radius_arcsec=3.0)
+    assert result["beam_pixels"] is None
+    assert result["beam_arcsec"] is None
+    assert result["photometry"]["integrated_flux"] is None
+    # The peak is still a flux density, so it is still reported.
+    assert result["photometry"]["peak_per_beam"] is not None
+
+
+def test_robust_rms_ignores_outliers():
+    """Bright pixels in the noise region must not inflate the estimate."""
+    rng = np.random.default_rng(7)
+    noise = rng.normal(0, 1.0, 4000)
+    assert alma_bridge.robust_rms(noise) == pytest.approx(1.0, rel=0.1)
+
+    # A handful of very bright pixels -- a neighbouring source, or an artefact.
+    contaminated = np.concatenate([noise, np.full(40, 500.0)])
+    assert alma_bridge.robust_rms(contaminated) == pytest.approx(1.0, rel=0.15)
+    # Without clipping the same data reads an order of magnitude noisier.
+    assert np.std(contaminated) > 10
+
+
+def test_robust_rms_handles_empty_and_nan_input():
+    assert alma_bridge.robust_rms([]) is None
+    assert alma_bridge.robust_rms([float("nan")] * 5) is None
