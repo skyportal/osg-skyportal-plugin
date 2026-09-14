@@ -67,6 +67,8 @@ def bundle_for_skyportal(result: dict) -> dict:
         analysis["model_spectrum"] = result["model_spectrum"]
     if result.get("model_spectrum_summary"):
         analysis["model_spectrum_summary"] = result["model_spectrum_summary"]
+    if result.get("model_spectrum_source"):
+        analysis["model_spectrum_source"] = result["model_spectrum_source"]
     return {
         "status": "success",
         "message": result.get("message", "NGSF complete"),

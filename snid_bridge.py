@@ -354,5 +354,12 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
         "annotations": annotations,
         "model_spectrum": model_spectrum,
         "model_spectrum_summary": model_spectrum_summary,
+        # Which spectrum this fit was made against: several runs of one service
+        # on an object are otherwise indistinguishable in the overlay.
+        "model_spectrum_source": {
+            "index": index,
+            "observed_at": row.get("observed_at"),
+            "instrument_name": row.get("instrument_name") or row.get("origin"),
+        },
         "plot_files": plots,
     }
