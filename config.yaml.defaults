@@ -103,7 +103,12 @@ services:
                     # the archive.
                     # A ceiling per job, so one pathological dataset cannot wedge
                     # the submit host or the transfer.
-                    max_stage_bytes: 2147483648   # 2 GiB
+                    # Delivered-product size varies by more than an order of
+                    # magnitude between datasets, so the count is the real bound
+                    # and the byte budget is the backstop. max_cubes overrides
+                    # max_datasets per request.
+                    max_datasets: 1
+                    max_stage_bytes: 1073741824   # 1 GiB
                     # The delivered products alone are enough for a spectrum and a
                     # moment map; auxiliary adds calibration tables and the weblog.
                     include_auxiliary: false

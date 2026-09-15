@@ -343,11 +343,18 @@ def _stage_wrapper_job(
         import alma_staging
 
         alma_cfg = cfg.get("alma") or {}
+        max_datasets = params.get(
+            "max_datasets",
+            params.get(
+                "max_cubes", alma_cfg.get("max_datasets", alma_staging.DEFAULT_MAX_DATASETS)
+            ),
+        )
         staged, notes = alma_staging.stage(
             inputs,
             job_dir / "alma",
             max_bytes=int(alma_cfg.get("max_stage_bytes", alma_staging.DEFAULT_MAX_BYTES)),
             include_auxiliary=bool(alma_cfg.get("include_auxiliary", False)),
+            max_datasets=int(max_datasets) if max_datasets else None,
         )
         for note in notes:
             log(f"alma staging: {note}")
@@ -500,6 +507,15 @@ def submit_job(
     needs_spool = bool(cfg["htcondor"].get("spool", True))
     sub = htcondor.Submit(submit_desc)
     cluster_id = _commit_submit(schedd, sub, spool=needs_spool)
+
+    # Spooling copies the inputs to the schedd, so staged ALMA products are dead
+    # weight once the submit succeeds; left alone they accumulate by the GB.
+    if needs_spool:
+        staged_dir = Path(cfg.get("staging_dir", "staging")).resolve() / cluster_uuid / "alma"
+        if staged_dir.is_dir():
+            freed = sum(f.stat().st_size for f in staged_dir.rglob("*") if f.is_file())
+            shutil.rmtree(staged_dir, ignore_errors=True)
+            log(f"cleared {freed / 1e6:.0f} MB of staged ALMA products for {cluster_id}")
 
     JOBS[(cluster_id, 0)] = JobRecord(
         cluster_id=cluster_id,

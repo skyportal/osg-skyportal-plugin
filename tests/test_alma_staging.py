@@ -116,9 +116,54 @@ def test_a_dataset_the_archive_cannot_serve_does_not_lose_the_others(tmp_path, m
         return []
 
     monkeypatch.setattr(alma_staging, "datalink_rows", rows)
+    # max_datasets is what this test is not about, so let both through.
     staged, notes = alma_staging.stage(
-        {"analysis_parameters": {"dataset_uids": ["uid://BAD", "uid://OK"]}}, tmp_path
+        {"analysis_parameters": {"dataset_uids": ["uid://BAD", "uid://OK"]}},
+        tmp_path,
+        max_datasets=None,
     )
     assert staged == []
     assert any("datalink unavailable" in n for n in notes)
     assert any("no delivered products" in n for n in notes)
+
+
+def test_only_max_datasets_are_fetched(tmp_path, monkeypatch):
+    """A source can carry dozens of uids; fetching all that fit pulls GBs."""
+    fetched = []
+
+    def rows(uid):
+        fetched.append(uid)
+        return []  # no products, so nothing downloads
+
+    monkeypatch.setattr(alma_staging, "datalink_rows", rows)
+    _, notes = alma_staging.stage(
+        {"analysis_parameters": {"dataset_uids": [f"uid://A/{i}" for i in range(9)]}},
+        tmp_path,
+        max_datasets=2,
+    )
+    assert fetched == ["uid://A/0", "uid://A/1"]
+    assert any("2 of 9 datasets" in n for n in notes)
+
+
+def test_max_datasets_none_means_no_count_limit(tmp_path, monkeypatch):
+    fetched = []
+    monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: fetched.append(uid) or [])
+    alma_staging.stage(
+        {"analysis_parameters": {"dataset_uids": ["uid://A/1", "uid://A/2"]}},
+        tmp_path,
+        max_datasets=None,
+    )
+    assert len(fetched) == 2
+
+
+def test_the_byte_budget_still_backs_the_count_limit(tmp_path, monkeypatch):
+    """Delivered products vary by an order of magnitude, so both bounds apply."""
+    monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: DATALINK)
+    staged, notes = alma_staging.stage(
+        {"analysis_parameters": {"dataset_uids": ["uid://A/1"]}},
+        tmp_path,
+        max_bytes=1_000_000,
+        max_datasets=5,
+    )
+    assert staged == []
+    assert any("exceeds" in n for n in notes)

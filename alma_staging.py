@@ -17,9 +17,11 @@ PRODUCT_SEMANTICS = "#this"
 AUXILIARY_SEMANTICS = "#auxiliary"
 PROGENITOR_SEMANTICS = "#progenitor"
 
-# A ceiling on what one job is allowed to carry, so a pathological dataset
-# cannot wedge the submit host or the transfer.
-DEFAULT_MAX_BYTES = 2 * 1024**3
+# Ceilings on what one job carries. Delivered-product size varies by more than
+# an order of magnitude between datasets (tens of MB to hundreds), so the count
+# is the useful bound and the byte budget is the backstop.
+DEFAULT_MAX_BYTES = 1024**3
+DEFAULT_MAX_DATASETS = 1
 
 
 def classify_products(rows) -> dict:
@@ -146,6 +148,7 @@ def stage(
     dest: Path,
     max_bytes: int = DEFAULT_MAX_BYTES,
     include_auxiliary: bool = False,
+    max_datasets: int = DEFAULT_MAX_DATASETS,
 ) -> tuple[list[Path], list[str]]:
     """Download the products for this request into `dest`.
 
@@ -158,8 +161,15 @@ def stage(
     uids = dataset_uids(inputs)
     if not uids:
         return [], ["No ALMA datasets named in the request or its annotations"]
+    notes: list[str] = []
 
-    staged, notes, budget = [], [], max_bytes
+    # A source can carry dozens of datasets; fetching all of them that fit the
+    # byte budget pulls gigabytes for a reduction that reads a few cubes.
+    if max_datasets and len(uids) > max_datasets:
+        notes.append(f"staging {max_datasets} of {len(uids)} datasets; raise max_datasets to widen")
+        uids = uids[:max_datasets]
+
+    staged, budget = [], max_bytes
     for uid in uids:
         try:
             plan = staging_plan(datalink_rows(uid), include_auxiliary=include_auxiliary)
