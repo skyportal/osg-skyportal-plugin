@@ -27,12 +27,12 @@ ARCHIVE_ANNOTATION_ORIGIN = "alma-archive"
 
 
 def source_position(payload: dict) -> tuple[float | None, float | None]:
-    """The source's sky position, as SkyPortal now sends it in `inputs.obj`."""
-    obj = (payload.get("inputs") or {}).get("obj") or {}
+    """The source's sky position, as SkyPortal now sends it in `obj`."""
+    obj = payload.get("obj") or {}
     ra, dec = obj.get("ra"), obj.get("dec")
     if ra is None or dec is None:
         # Fall back to explicit parameters, so the bridge is usable standalone.
-        params = (payload.get("inputs") or {}).get("analysis_parameters") or {}
+        params = payload.get("analysis_parameters") or {}
         ra, dec = params.get("ra"), params.get("dec")
     try:
         return float(ra), float(dec)
@@ -309,7 +309,7 @@ def plot_reduction(reduction: dict, work: Path) -> list[str]:
 def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir: str = ".") -> dict:
     """Reduce whatever products were staged for this job."""
     work = Path(work_dir)
-    params = (payload.get("inputs") or {}).get("analysis_parameters") or {}
+    params = payload.get("analysis_parameters") or {}
     try:
         radius_arcsec = float(params.get("aperture_arcsec", 1.0))
     except (TypeError, ValueError):

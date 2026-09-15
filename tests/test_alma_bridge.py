@@ -56,10 +56,8 @@ def staged(tmp_path):
 
 def _payload(**params):
     return {
-        "inputs": {
-            "obj": {"id": "T1", "ra": RA, "dec": DEC},
-            "analysis_parameters": params,
-        }
+        "obj": {"id": "T1", "ra": RA, "dec": DEC},
+        "analysis_parameters": params,
     }
 
 
@@ -69,12 +67,12 @@ def test_position_comes_from_the_obj_block():
 
 def test_position_falls_back_to_explicit_parameters():
     """Usable standalone, without SkyPortal's obj block."""
-    payload = {"inputs": {"analysis_parameters": {"ra": 10.0, "dec": -20.0}}}
+    payload = {"analysis_parameters": {"ra": 10.0, "dec": -20.0}}
     assert alma_bridge.source_position(payload) == (10.0, -20.0)
 
 
 def test_missing_position_is_reported_not_guessed():
-    assert alma_bridge.source_position({"inputs": {}}) == (None, None)
+    assert alma_bridge.source_position({}) == (None, None)
 
 
 def test_calibration_products_are_not_mistaken_for_science(staged):
@@ -106,7 +104,7 @@ def test_reduction_recovers_the_line(staged):
 
 
 def test_a_position_off_the_cube_fails_cleanly(staged):
-    payload = {"inputs": {"obj": {"id": "T1", "ra": RA + 40.0, "dec": DEC}}}
+    payload = {"obj": {"id": "T1", "ra": RA + 40.0, "dec": DEC}}
     result = alma_bridge.run_from_skyportal_inputs(payload, work_dir=str(staged))
     assert result["status"] == "failure"
     assert "cube" in result["message"].lower()

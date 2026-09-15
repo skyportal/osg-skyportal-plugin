@@ -33,7 +33,7 @@ def load_inputs(path: Path = Path("inputs.json")) -> dict:
 def run(inputs: dict) -> dict:
     from alma_bridge import run_from_skyportal_inputs  # shipped per-job
 
-    resource_id = inputs.get("resource_id", "obj")
+    resource_id = inputs.get("resource_id") or (inputs.get("obj") or {}).get("id") or "obj"
     return run_from_skyportal_inputs(inputs, resource_id=resource_id, work_dir=".")
 
 
