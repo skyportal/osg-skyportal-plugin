@@ -715,3 +715,26 @@ def test_merge_jax_cache_guards_against_self_delete(plugin_cfg, tmp_path, monkey
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+MB = 1024**2
+ALMA_DEFAULTS = {"request_disk": 1024, "max_runtime_seconds": 3600}
+
+
+def test_alma_scratch_never_drops_below_the_default():
+    sizing = main.alma_job_sizing(20 * MB, {}, ALMA_DEFAULTS)
+    disk_mb = int(sizing.get("request_disk", "1024MB").removesuffix("MB"))
+    assert disk_mb >= ALMA_DEFAULTS["request_disk"]
+
+
+def test_alma_scratch_covers_the_archives_and_their_extraction():
+    sizing = main.alma_job_sizing(8020 * MB, {}, ALMA_DEFAULTS)
+    disk_mb = int(sizing["request_disk"].removesuffix("MB"))
+    # Room for the 8 GB of tarballs plus what they unpack into.
+    assert disk_mb > 2 * 8020
+    assert int(sizing["+MaxRuntime"]) > ALMA_DEFAULTS["max_runtime_seconds"]
+
+
+def test_an_explicit_request_wins_over_the_staged_size():
+    params = {"request_disk": 4096, "max_runtime_seconds": 600}
+    assert main.alma_job_sizing(8020 * MB, params, ALMA_DEFAULTS) == {}

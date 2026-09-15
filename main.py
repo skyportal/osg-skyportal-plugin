@@ -240,6 +240,27 @@ WRAPPER_DEFAULT_IMAGE = {
 }
 
 
+def alma_job_sizing(staged_bytes: int, params: dict, defaults: dict) -> dict:
+    """Scratch and walltime for an ALMA job, from the bytes actually staged.
+
+    The worker extracts the tarballs it receives, so it needs room for both the
+    archives and their contents. An explicit per-request value always wins.
+    """
+    sizing = {}
+    mb = staged_bytes / (1024**2)
+    if "request_disk" not in params:
+        # Archives plus their extracted contents, and headroom for the products.
+        want = int(mb * 2.5) + 1024
+        if want > int(defaults.get("request_disk", 1024)):
+            sizing["request_disk"] = f"{want}MB"
+    if "max_runtime_seconds" not in params:
+        # Reduction is linear in cube size; measured ~150 s for a 317 MB dataset.
+        want = int(mb * 2.0) + 1800
+        if want > int(defaults.get("max_runtime_seconds", 3600)):
+            sizing["+MaxRuntime"] = str(want)
+    return sizing
+
+
 def _stage_wrapper_job(
     cfg: dict, params: dict, inputs: dict, cluster_uuid: str
 ) -> tuple[dict, str | None]:
@@ -336,6 +357,7 @@ def _stage_wrapper_job(
     inputs_json = job_dir / "inputs.json"
     transfer = [str(f) for f in wrapper_files] + [str(inputs_json)]
 
+    alma_staged_bytes = 0
     # ALMA products are fetched here, not on the worker: the execute node is not
     # assumed to reach the archive. Only the delivered products travel, which is
     # tens of MB rather than the raw ASDM's hundreds.
@@ -359,6 +381,9 @@ def _stage_wrapper_job(
         for note in notes:
             log(f"alma staging: {note}")
         transfer += [str(path) for path in staged]
+        # The worker unpacks what it receives, so scratch and walltime have to
+        # follow the staged bytes; the 1 GB default only fits the small datasets.
+        alma_staged_bytes = sum(p.stat().st_size for p in staged if p.exists())
 
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
     # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).
@@ -389,6 +414,8 @@ def _stage_wrapper_job(
     # per-request image still wins.
     if not params.get("singularity_image") and wrapper in WRAPPER_DEFAULT_IMAGE:
         overrides["+SingularityImage"] = f'"{WRAPPER_DEFAULT_IMAGE[wrapper]}"'
+    if alma_staged_bytes:
+        overrides.update(alma_job_sizing(alma_staged_bytes, params, cfg.get("defaults") or {}))
     return overrides, output_url
 
 
