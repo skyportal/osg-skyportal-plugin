@@ -50,6 +50,15 @@ DEFAULTS = {
     "z_range_begin": 0.0,
     "z_range_end": 0.15,
     "z_int": 0.001,
+    # Masking and continuum removal. Anything not written into parameters.json
+    # below keeps whatever the container image was built with, which is not
+    # something a caller can see or change, so these are passed explicitly.
+    # Telluric bands sit at fixed observed wavelengths and belong to the sky
+    # rather than the source, so removing them is on by default.
+    "mask_telluric": 1,
+    "mask_galaxy_lines": 0,
+    "continuum_width": 0,
+    "continuum_order": 0,
 }
 
 
@@ -189,11 +198,20 @@ def _prepare_tree(root: Path, payload: dict, lo: float, hi: float) -> Path:
             "z_range_end": params["z_range_end"],
             "z_int": params["z_int"],
             "how_many_plots": params["n_results"],
+            "mask_telluric": int(params["mask_telluric"]),
+            "mask_galaxy_lines": int(params["mask_galaxy_lines"]),
+            "continuum_width": int(params["continuum_width"]),
+            "continuum_order": int(params["continuum_order"]),
             "show_plot": 0,
             "show_plot_png": 1,
             "fritz_token": "",
         }
     )
+    # Host lines are placed by redshift, so masking them needs one. NGSF refuses
+    # the combination rather than masking at the wrong wavelengths.
+    if config["mask_galaxy_lines"] and params.get("mask_host_lines_z") is not None:
+        config["mask_host_lines_z"] = float(params["mask_host_lines_z"])
+
     config_path.write_text(json.dumps(config))
     return tree
 

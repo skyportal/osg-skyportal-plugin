@@ -7,6 +7,7 @@ resolution, and wavelength-range precedence.
 
 import csv
 import io
+import json
 
 import pytest
 
@@ -301,3 +302,54 @@ def test_non_finite_chi2_is_reported_as_failure(tmp_path, monkeypatch):
     assert result["annotations"] == {}
     assert result["model_spectrum"] is None
     assert result["results"]["spectrum"]["wav_overlap_fraction"] == 0.0
+
+
+def _fake_ngsf_tree(tmp_path, monkeypatch):
+    """A stand-in for the image's /opt/NGSF, with the config NGSF ships."""
+    src = tmp_path / "image-NGSF"
+    (src / "config").mkdir(parents=True)
+    (src / "config" / "parameters.json").write_text(
+        json.dumps({"mask_telluric": 0, "mask_galaxy_lines": 0, "resolution": 10})
+    )
+    monkeypatch.setattr(ngsf_bridge, "NGSF_DIR", src)
+    return src
+
+
+def test_masking_is_written_into_the_config_not_left_to_the_image(tmp_path, monkeypatch):
+    """Whatever the container was built with must not decide whether the
+    atmosphere is removed; the request does."""
+    _fake_ngsf_tree(tmp_path, monkeypatch)
+    tree = ngsf_bridge._prepare_tree(tmp_path / "run", {}, 4000.0, 9000.0)
+    cfg = json.loads((tree / "config" / "parameters.json").read_text())
+    # the image said 0; the default is to remove the sky
+    assert cfg["mask_telluric"] == 1
+    assert cfg["mask_galaxy_lines"] == 0
+    assert cfg["continuum_width"] == 0 and cfg["continuum_order"] == 0
+
+
+def test_masking_parameters_come_from_the_request(tmp_path, monkeypatch):
+    _fake_ngsf_tree(tmp_path, monkeypatch)
+    payload = {
+        "analysis_parameters": {
+            "mask_telluric": 0,
+            "mask_galaxy_lines": 1,
+            "mask_host_lines_z": 0.086,
+            "continuum_order": 3,
+        }
+    }
+    tree = ngsf_bridge._prepare_tree(tmp_path / "run", payload, 4000.0, 9000.0)
+    cfg = json.loads((tree / "config" / "parameters.json").read_text())
+    assert cfg["mask_telluric"] == 0
+    assert cfg["mask_galaxy_lines"] == 1
+    assert cfg["mask_host_lines_z"] == 0.086
+    assert cfg["continuum_order"] == 3
+
+
+def test_host_line_redshift_is_only_set_when_masking_asks_for_it(tmp_path, monkeypatch):
+    """NGSF refuses host masking without a redshift rather than masking at the
+    wrong wavelengths, so the key is not written when masking is off."""
+    _fake_ngsf_tree(tmp_path, monkeypatch)
+    payload = {"analysis_parameters": {"mask_galaxy_lines": 0, "mask_host_lines_z": 0.5}}
+    tree = ngsf_bridge._prepare_tree(tmp_path / "run", payload, 4000.0, 9000.0)
+    cfg = json.loads((tree / "config" / "parameters.json").read_text())
+    assert "mask_host_lines_z" not in cfg
