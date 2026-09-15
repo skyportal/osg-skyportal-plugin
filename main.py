@@ -1147,6 +1147,39 @@ class AnalysisHandler(tornado.web.RequestHandler):
             self.write({"status": "pending", "queued": True})
             return
 
+        if wrapper_name == "alma":
+            # Staging downloads the products before submitting, which runs for
+            # minutes; awaiting it here would hold the HTTP response open until
+            # SkyPortal gave up on the request. Answer now and let the callback
+            # carry the outcome, as batch mode does.
+            def _submit_alma():
+                try:
+                    submit_job(
+                        self.cfg,
+                        analysis_name=analysis_name,
+                        resource_id=data.get("resource_id"),
+                        callback_url=data["callback_url"],
+                        callback_method=data["callback_method"],
+                        inputs=data["inputs"],
+                    )
+                except Exception as e:  # noqa: BLE001 -- nothing is awaiting this
+                    log(f"alma submit failed for {data.get('resource_id')}: {e!r}")
+                    # The request already got "pending", so the callback is how
+                    # it learns the submit never happened.
+                    _post_failure_callbacks(
+                        [
+                            {
+                                "callback_url": data["callback_url"],
+                                "callback_method": data["callback_method"],
+                            }
+                        ],
+                        str(e),
+                    )
+
+            asyncio.get_running_loop().run_in_executor(_SUBMIT_POOL, _submit_alma)
+            self.write({"status": "pending", "queued": True})
+            return
+
         try:
             # Offload the blocking condor submit to a worker thread so the event
             # loop stays free to accept other requests (and keep the poller running).
