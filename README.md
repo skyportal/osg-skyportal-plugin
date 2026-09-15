@@ -50,6 +50,27 @@ uv run python register_analysis_service.py \
     --group-ids 1
 ```
 
+### NGSF spectral fitting
+
+The masking and continuum switches are the ones worth exposing: the fitter's
+defaults used to come from whatever the container image was built with, which
+is invisible from the source page. `examples/ngsf_osg_parameters.json` holds the
+set, with the wording users see.
+
+```bash
+uv run python register_analysis_service.py \
+    --name NGSF_OSG \
+    --display "NGSF (OSG)" \
+    --listener-url http://<plugin-host>:7100/analysis/ngsf_osg \
+    --analysis-type spectrum_fitting \
+    --input-data-types spectra redshift \
+    --optional-params-json "$(cat examples/ngsf_osg_parameters.json)" \
+    --group-ids 1
+```
+
+Re-running this against an existing name updates it in place, so a changed
+parameter set does not mean deleting the service and its analyses.
+
 The products are downloaded here and transferred in with the job — the execute
 node is not assumed to reach the archive — so it reuses the fiesta image rather
 than needing one of its own. Only the delivered products travel (tens of MB);

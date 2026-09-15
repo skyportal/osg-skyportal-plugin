@@ -1,6 +1,9 @@
 """
-One-shot helper: POST /api/analysis_service to register this plugin's URL with
-SkyPortal so users can run it from the source-analysis page.
+Register this plugin's URL with SkyPortal so users can run it from the
+source-analysis page, or update a registration that is already there.
+
+Re-running with the same --name updates the existing service rather than
+failing on the duplicate, so a changed parameter set is one command away.
 
 Reads the same config block as main.py; pulls the SkyPortal base URL + token
 from `services.external.osg.params.skyportal`.
@@ -95,13 +98,29 @@ def main():
         "group_ids": args.group_ids,
     }
 
-    r = requests.post(
-        f"{base}/api/analysis_service",
-        json=body,
-        headers={"Authorization": f"token {api_token}"},
-        timeout=30,
+    headers = {"Authorization": f"token {api_token}"}
+
+    # A service is identified by name, and the parameter set is the thing most
+    # likely to change after the first registration, so update in place rather
+    # than making the caller find the id or delete and lose the analyses.
+    existing = requests.get(f"{base}/api/analysis_service", headers=headers, timeout=30)
+    existing.raise_for_status()
+    match = next(
+        (s for s in (existing.json().get("data") or []) if s.get("name") == args.name),
+        None,
     )
-    print(f"HTTP {r.status_code}: {r.text}")
+
+    if match:
+        r = requests.patch(
+            f"{base}/api/analysis_service/{match['id']}",
+            json=body,
+            headers=headers,
+            timeout=30,
+        )
+        print(f"updated {args.name} (id {match['id']}) -- HTTP {r.status_code}: {r.text}")
+    else:
+        r = requests.post(f"{base}/api/analysis_service", json=body, headers=headers, timeout=30)
+        print(f"registered {args.name} -- HTTP {r.status_code}: {r.text}")
     r.raise_for_status()
 
 

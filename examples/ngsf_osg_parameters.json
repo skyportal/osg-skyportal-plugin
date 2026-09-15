@@ -1,0 +1,41 @@
+{
+  "wrapper": ["ngsf"],
+  "singularity_image": [
+    "/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest",
+    "docker://michaelwcoughlin/ngsf"
+  ],
+  "spectrum_index": {"type": "number"},
+  "instrument": ["", "NGPS", "GHTS"],
+  "n_results": {"type": "number", "default": 3},
+  "mask_telluric": {
+    "type": "boolean",
+    "title": "Remove telluric bands",
+    "description": "Blank the atmospheric absorption bands (O2 at 6870 and 7600 A, water at 7200, 8200 and 9000 A). These sit at fixed observed wavelengths and belong to the sky rather than the source. On unless you have a reason.",
+    "default": true
+  },
+  "mask_galaxy_lines": {
+    "type": "boolean",
+    "title": "Mask host galaxy lines",
+    "description": "Blank the host emission lines. They are placed by redshift, so this needs one: the fit's own, or the value set below. No SN template contains them, so leaving them in puts a large residual where the redshift is decided.",
+    "default": false
+  },
+  "mask_host_lines_z": {
+    "type": "number",
+    "title": "Redshift for host line masking",
+    "description": "Where to place the host lines. Leave blank to use the redshift being fitted; set it when scanning redshift freely and the host value is known."
+  },
+  "continuum_order": {
+    "type": "number",
+    "title": "Continuum polynomial order",
+    "description": "Divide out a polynomial continuum of this order before fitting, SNID-style, so the fit follows line shape rather than overall colour. 0 leaves the continuum in and lets the host component carry it.",
+    "default": 0
+  },
+  "continuum_width": {
+    "type": "number",
+    "title": "Continuum smoothing width",
+    "description": "Running-median continuum width in pixels, used when the polynomial order is 0. 0 disables it.",
+    "default": 0
+  },
+  "request_cpus": {"type": "number", "default": 1},
+  "request_memory": {"type": "number", "default": 2048}
+}
