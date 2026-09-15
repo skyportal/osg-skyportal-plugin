@@ -141,8 +141,10 @@ def test_only_max_datasets_are_fetched(tmp_path, monkeypatch):
         tmp_path,
         max_datasets=2,
     )
-    assert fetched == ["uid://A/0", "uid://A/1"]
-    assert any("2 of 9 datasets" in n for n in notes)
+    # Nothing stages (no products), so the count bound never trips and every
+    # candidate is considered rather than the list being truncated up front.
+    assert fetched == [f"uid://A/{i}" for i in range(9)]
+    assert all("no delivered products" in n for n in notes)
 
 
 def test_max_datasets_none_means_no_count_limit(tmp_path, monkeypatch):
@@ -167,3 +169,57 @@ def test_the_byte_budget_still_backs_the_count_limit(tmp_path, monkeypatch):
     )
     assert staged == []
     assert any("exceeds" in n for n in notes)
+
+
+def test_unusable_datasets_do_not_consume_the_dataset_budget(tmp_path, monkeypatch):
+    """The archive lists many datasets with no delivered products at all.
+
+    Counting those against max_datasets would strand a request whose usable
+    data sits further down the list.
+    """
+    usable = [
+        {
+            "access_url": "https://almascience.org/dl/small.tar",
+            "semantics": "#this",
+            "content_length": 1000,
+        }
+    ]
+
+    def rows(uid):
+        return usable if uid == "uid://A/GOOD" else []
+
+    downloaded = []
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size=0):
+            return [b"x" * 1000]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_get(url, stream=False, timeout=None):
+        downloaded.append(url)
+        return Response()
+
+    monkeypatch.setattr(alma_staging, "datalink_rows", rows)
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    staged, notes = alma_staging.stage(
+        {
+            "analysis_parameters": {
+                "dataset_uids": ["uid://A/EMPTY1", "uid://A/EMPTY2", "uid://A/GOOD"]
+            }
+        },
+        tmp_path,
+        max_datasets=1,
+    )
+    assert len(staged) == 1 and staged[0].name == "small.tar"
+    assert downloaded == ["https://almascience.org/dl/small.tar"]

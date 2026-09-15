@@ -163,14 +163,16 @@ def stage(
         return [], ["No ALMA datasets named in the request or its annotations"]
     notes: list[str] = []
 
-    # A source can carry dozens of datasets; fetching all of them that fit the
-    # byte budget pulls gigabytes for a reduction that reads a few cubes.
-    if max_datasets and len(uids) > max_datasets:
-        notes.append(f"staging {max_datasets} of {len(uids)} datasets; raise max_datasets to widen")
-        uids = uids[:max_datasets]
-
-    staged, budget = [], max_bytes
+    # A source can carry dozens of datasets; fetching every one that fits the
+    # byte budget pulls gigabytes for a reduction that reads a few cubes. The
+    # bound is on datasets actually staged, not on candidates considered: the
+    # archive lists plenty with no delivered products at all, and stopping at
+    # those would strand a request whose usable data sits further down.
+    staged, budget, taken = [], max_bytes, 0
     for uid in uids:
+        if max_datasets and taken >= max_datasets:
+            notes.append(f"staged {taken} of {len(uids)} datasets; raise max_datasets to widen")
+            break
         try:
             plan = staging_plan(datalink_rows(uid), include_auxiliary=include_auxiliary)
         except Exception as e:  # noqa: BLE001 -- one bad uid must not lose the rest
@@ -195,6 +197,7 @@ def stage(
                         fh.write(chunk)
             staged.append(target)
             budget -= target.stat().st_size
+        taken += 1
 
     if not staged and not notes:
         notes.append("Nothing was staged for this request")
