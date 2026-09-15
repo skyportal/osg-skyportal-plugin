@@ -22,6 +22,10 @@ PROGENITOR_SEMANTICS = "#progenitor"
 # is the useful bound and the byte budget is the backstop.
 DEFAULT_MAX_BYTES = 1024**3
 DEFAULT_MAX_DATASETS = 1
+# The OSG access point refuses to send a single spooled input file larger than
+# this, so a bigger tarball is a job that is held after the transfer, not a slow
+# one. ALMA delivers one tarball per dataset, so this bounds the dataset too.
+DEFAULT_MAX_FILE_BYTES = 5000 * 1000**2
 
 
 def classify_products(rows) -> dict:
@@ -149,6 +153,7 @@ def stage(
     max_bytes: int = DEFAULT_MAX_BYTES,
     include_auxiliary: bool = False,
     max_datasets: int = DEFAULT_MAX_DATASETS,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
 ) -> tuple[list[Path], list[str]]:
     """Download the products for this request into `dest`.
 
@@ -180,6 +185,13 @@ def stage(
             continue
         if not plan["files"]:
             notes.append(f"{uid}: no delivered products on offer")
+            continue
+        oversized = [f for f in plan["files"] if max_file_bytes and f["bytes"] > max_file_bytes]
+        if oversized:
+            notes.append(
+                f"{uid}: skipped, {max(f['bytes'] for f in oversized) / 1e6:.0f} MB file "
+                f"exceeds the {max_file_bytes / 1e6:.0f} MB the access point will transfer"
+            )
             continue
         if plan["total_bytes"] > budget:
             notes.append(

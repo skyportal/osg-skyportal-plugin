@@ -377,6 +377,7 @@ def _stage_wrapper_job(
             max_bytes=int(alma_cfg.get("max_stage_bytes", alma_staging.DEFAULT_MAX_BYTES)),
             include_auxiliary=bool(alma_cfg.get("include_auxiliary", False)),
             max_datasets=int(max_datasets) if max_datasets else None,
+            max_file_bytes=int(alma_cfg.get("max_file_bytes", alma_staging.DEFAULT_MAX_FILE_BYTES)),
         )
         for note in notes:
             log(f"alma staging: {note}")

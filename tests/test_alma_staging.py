@@ -223,3 +223,23 @@ def test_unusable_datasets_do_not_consume_the_dataset_budget(tmp_path, monkeypat
     )
     assert len(staged) == 1 and staged[0].name == "small.tar"
     assert downloaded == ["https://almascience.org/dl/small.tar"]
+
+
+def test_a_dataset_too_large_for_the_access_point_is_not_downloaded(monkeypatch, tmp_path):
+    """A 7.6 GB tarball is a held job, not a slow one, so never fetch it."""
+    rows = [
+        {"access_url": "https://a/huge.tar", "semantics": "#this", "content_length": 7649 * 1000**2}
+    ]
+    monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: rows)
+
+    def fail(*a, **k):
+        raise AssertionError("oversized dataset must not be downloaded")
+
+    monkeypatch.setattr("requests.get", fail)
+    staged, notes = alma_staging.stage(
+        {"analysis_parameters": {"dataset_uids": ["uid://X/1"]}},
+        tmp_path,
+        max_bytes=12 * 1024**3,
+    )
+    assert staged == []
+    assert any("access point will transfer" in n for n in notes)
