@@ -237,6 +237,9 @@ WRAPPER_DEFAULT_IMAGE = {
     # so its CVMFS image is fine.
     "snid": "docker://ghcr.io/fiorenst/snid-sage",
     "mosfit": "docker://ashleyvillar/mosfit",
+    # docker:// not CVMFS: buoy lives in the image's /opt/env venv, which the
+    # docker env puts on PATH but the CVMFS sandbox invocation does not.
+    "aframe": "docker://ghcr.io/ml4gw/buoy/buoy:main",
 }
 
 
@@ -277,6 +280,7 @@ def _stage_wrapper_job(
         "ngsf",
         "snid",
         "alma",
+        "aframe",
     ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
         return {}, None
@@ -328,6 +332,13 @@ def _stage_wrapper_job(
         wrapper_files = [
             (plugin_dir / "alma_wrapper.py").resolve(),
             (plugin_dir / "alma_bridge.py").resolve(),
+        ]
+    elif wrapper == "aframe":
+        # ml4gw runtime image; the model files are staged below.
+        wrapper_name = "aframe_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "aframe_wrapper.py").resolve(),
+            (plugin_dir / "aframe_bridge.py").resolve(),
         ]
     else:
         wrapper_name = "fiesta_wrapper.py"
@@ -386,12 +397,33 @@ def _stage_wrapper_job(
         # follow the staged bytes; the 1 GB default only fits the small datasets.
         alma_staged_bytes = sum(p.stat().st_size for p in staged if p.exists())
 
+    # aframe needs its weights + config (and an optional FAR background) on the
+    # worker. Copy the configured files in under the canonical basenames the
+    # bridge expects, so a renamed source file still lands as aframe.pt etc.
+    if wrapper == "aframe":
+        import shutil
+
+        aframe_cfg = cfg.get("aframe") or {}
+        for key, dest in (
+            ("weights", "aframe.pt"),
+            ("config", "aframe_config_bbh.yaml"),
+            ("background", "background.hdf5"),
+        ):
+            src = aframe_cfg.get(key)
+            if src and Path(src).exists():
+                target = job_dir / dest
+                shutil.copy(src, target)
+                transfer.append(str(target))
+            elif key != "background":
+                log(f"aframe: no `{key}` configured (aframe.{key}); the job will fail without it")
+
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
     # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).
     # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under
     # its basename; populate it out-of-band.
     jax_cache_dir = cfg.get("jax_cache_dir")
-    if wrapper not in ("periodfind", "mosfit", "pygrb", "ngsf", "snid", "alma") and jax_cache_dir:
+    non_jax = ("periodfind", "mosfit", "pygrb", "ngsf", "snid", "alma", "aframe")
+    if wrapper not in non_jax and jax_cache_dir:
         cache_path = Path(jax_cache_dir).resolve()
         if cache_path.is_dir() and any(cache_path.iterdir()):
             transfer.append(str(cache_path))

@@ -455,6 +455,30 @@ def test_wrapper_supplies_default_image_when_request_omits_it(
     assert last_submit_desc["+SingularityImage"] == f'"{main.WRAPPER_DEFAULT_IMAGE["snid"]}"'
 
 
+def test_aframe_wrapper_stages_files_image_and_model(
+    plugin_cfg, last_submit_desc, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    plugin_cfg["staging_dir"] = str(tmp_path / "stg")
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"weights")
+    conf = tmp_path / "c.yaml"
+    conf.write_text("sample_rate: 2048")
+    plugin_cfg["aframe"] = {"weights": str(weights), "config": str(conf)}
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="aframe_osg",
+        resource_id="S190521",
+        callback_url=None,
+        callback_method="POST",
+        inputs={"analysis_parameters": {"wrapper": "aframe", "t_event": 1242442967.4}},
+    )
+    assert last_submit_desc["+SingularityImage"] == f'"{main.WRAPPER_DEFAULT_IMAGE["aframe"]}"'
+    transfer = last_submit_desc["transfer_input_files"]
+    for name in ("aframe_wrapper.py", "aframe_bridge.py", "aframe.pt", "aframe_config_bbh.yaml"):
+        assert name in transfer, name
+
+
 def test_explicit_image_overrides_wrapper_default(
     plugin_cfg, last_submit_desc, tmp_path, monkeypatch
 ):

@@ -112,6 +112,12 @@ services:
                     # The delivered products alone are enough for a spectrum and a
                     # moment map; auxiliary adds calibration tables and the weblog.
                     include_auxiliary: false
+                aframe:
+                    # aframe model files, staged with the job under the canonical
+                    # basenames aframe.pt / aframe_config_bbh.yaml / background.hdf5.
+                    weights: null       # path to the aframe weights (.pt)
+                    config: null        # path to the aframe config yaml
+                    background: null    # timeslide background hdf5 for the FAR (optional)
                 # Per-job scratch dir (inputs.json, etc.). Created on demand.
                 staging_dir: staging
                 auth:

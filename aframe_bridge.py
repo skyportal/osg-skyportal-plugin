@@ -1,0 +1,197 @@
+"""
+aframe bridge — targeted (on-source) gravitational-wave search.
+
+Runs the aframe detector NN (via ml4gw-buoy's ``buoy.Aframe``) over strain data
+around a target GPS time and returns a detection statistic and, when a
+background file is supplied, an empirical false-alarm rate. The ML4GW analog of
+a PyCBC targeted/on-source search.
+
+Payload (``analysis_parameters``), unlike the photometric bridges:
+- ``t_event``   GPS time to target (required).
+- ``ifos``      detectors to use (list or comma string; default H1, L1).
+- ``weights``   aframe weights file, staged next to this script (default aframe.pt).
+- ``config``    aframe config yaml (default aframe_config_bbh.yaml).
+- ``background``timeslide background hdf5 for the FAR; omit for score-only.
+- ``device``    torch device (default: cuda if present, else cpu).
+
+Torch/buoy/gwpy imports are lazy so the module loads without them (tests).
+"""
+
+from __future__ import annotations
+
+SECONDS_PER_YEAR = 3.156e7
+
+
+def _pick_device(pref):
+    import torch
+
+    if pref:
+        return pref
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _ifos(params):
+    val = params.get("ifos") or ["H1", "L1"]
+    if isinstance(val, str):
+        val = [s.strip() for s in val.split(",") if s.strip()]
+    return tuple(val)
+
+
+def _fetch_onsource(t_event, model, ifos, pad):
+    """GWOSC open strain spanning the model's minimum window around t_event,
+    resampled to the model rate. Returns (data_tensor (1, n_ifos, N), t0)."""
+    import numpy as np
+    import torch
+    from gwpy.timeseries import TimeSeries
+
+    min_duration = model.minimum_data_size / model.sample_rate
+    fetch_start = t_event - min_duration - pad
+    fetch_end = t_event + pad
+
+    series = []
+    for ifo in ifos:
+        ts = TimeSeries.fetch_open_data(ifo, fetch_start, fetch_end)
+        series.append(ts.resample(model.sample_rate))
+
+    n = min(len(ts.value) for ts in series)  # guard off-by-one across detectors
+    stacked = np.stack([ts.value[:n] for ts in series])
+    data = torch.tensor(stacked, dtype=torch.float32).unsqueeze(0)
+    return data, float(series[0].t0.value)
+
+
+def _run_inference(model, data, t0, t_event):
+    """Score time series with the PSD warm-up region masked. Returns dict of
+    times-relative-to-event plus raw/integrated online scores and the offline
+    significance-integrated score."""
+    import numpy as np
+
+    times, ys, timing_integrated, signif_integrated = model(data, t0)
+
+    def to_np(x):
+        return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
+
+    corrected = to_np(times) + model.time_offset
+    online = int(model.inference_sampling_rate * model.psd_length)
+    offline = int(model.offline_sampling_rate * model.psd_length)
+    signif_times = corrected[:: model.online_offline_stride]
+
+    return {
+        "t_online": corrected[online:] - t_event,
+        "raw": to_np(ys)[online:],
+        "integrated": to_np(timing_integrated)[online:],
+        "t_offline": signif_times[offline:] - t_event,
+        "signif_integrated": to_np(signif_integrated)[offline:],
+    }
+
+
+def _compute_far(loudest, background):
+    """(far_per_yr, is_upper_limit, n_louder, Tb) from a background hdf5, or a
+    None FAR when no background is given. Zero louder events -> upper limit."""
+    if not background:
+        return None, False, None, None
+
+    import h5py
+    import numpy as np
+
+    with h5py.File(background, "r") as f:
+        bg_scores = f["parameters"]["detection_statistic"][:]
+        Tb = float(f.attrs["Tb"])
+
+    n_louder = int(np.sum(bg_scores >= loudest))
+    if n_louder == 0:
+        return (1.0 / Tb) * SECONDS_PER_YEAR, True, 0, Tb
+    return (n_louder / Tb) * SECONDS_PER_YEAR, False, n_louder, Tb
+
+
+def _score_plot(series, t_event, resource_id):
+    import tempfile
+    from pathlib import Path
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(series["t_online"], series["raw"], label="raw", alpha=0.6)
+    ax.plot(series["t_online"], series["integrated"], label="integrated")
+    ax.plot(series["t_offline"], series["signif_integrated"], label="signif integrated")
+    ax.axvline(0, color="red", ls="--", label="event time")
+    ax.set_xlabel("Time relative to event (s)")
+    ax.set_ylabel("aframe score")
+    ax.set_title(f"aframe targeted search — {resource_id}")
+    ax.legend()
+    fig.tight_layout()
+    out = Path(tempfile.gettempdir()) / f"aframe_{resource_id}.png"
+    fig.savefig(out, dpi=100)
+    plt.close(fig)
+    return out
+
+
+def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
+    params = inputs.get("analysis_parameters") or {}
+    if params.get("t_event") in (None, ""):
+        return {"status": "failure", "message": "aframe needs a `t_event` GPS time."}
+
+    import numpy as np
+    from buoy import Aframe
+
+    t_event = float(params["t_event"])
+    ifos = _ifos(params)
+    pad = float(params.get("pad", 10.0))
+
+    model = Aframe(
+        model_weights=str(params.get("weights", "aframe.pt")),
+        config=str(params.get("config", "aframe_config_bbh.yaml")),
+        device=_pick_device(params.get("device")),
+        load_weights=True,
+    )
+
+    data, t0 = _fetch_onsource(t_event, model, ifos, pad)
+    series = _run_inference(model, data, t0, t_event)
+
+    # Loudest on-source statistic: max significance-integrated score over the
+    # valid (post-warm-up) window.
+    loudest = float(np.max(series["signif_integrated"]))
+    # Use a staged background.hdf5 for the FAR unless one is named explicitly.
+    background = params.get("background")
+    if not background:
+        from pathlib import Path
+
+        background = "background.hdf5" if Path("background.hdf5").exists() else None
+    far, is_ul, n_louder, Tb = _compute_far(loudest, background)
+
+    plot_file = _score_plot(series, t_event, resource_id)
+
+    results = {
+        "t_event": t_event,
+        "ifos": list(ifos),
+        "detection_statistic": loudest,
+        "far_per_yr": far,
+        "far_is_upper_limit": is_ul,
+        "n_louder": n_louder,
+        "background_livetime_s": Tb,
+    }
+    op = "<" if is_ul else "="
+    message = (
+        f"aframe stat={loudest:.4g}, FAR {op} {far:.3g} yr^-1"
+        if far is not None
+        else f"aframe stat={loudest:.4g} (no background; FAR n/a)"
+    )
+    annotations = [
+        {
+            "origin": "aframe",
+            "data": {
+                "aframe_detection_statistic": loudest,
+                "aframe_far_per_yr": far,
+                "aframe_far_is_upper_limit": is_ul,
+            },
+        }
+    ]
+    return {
+        "status": "success",
+        "message": message,
+        "results": results,
+        "annotations": annotations,
+        "plot_file": str(plot_file),
+    }
