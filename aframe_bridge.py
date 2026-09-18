@@ -85,22 +85,36 @@ def _run_inference(model, data, t0, t_event):
 
 
 def _compute_far(loudest, background):
-    """(far_per_yr, is_upper_limit, n_louder, Tb) from a background hdf5, or a
-    None FAR when no background is given. Zero louder events -> upper limit."""
+    """(far_per_yr, bound, n_louder, Tb) from a background hdf5, or a None FAR
+    when no background is given. ``bound`` is "exact", "upper" (zero louder
+    events, so the FAR is an upper limit), or "lower" (a --top-k tail file whose
+    cutoff sits above this candidate, so the true FAR can only be larger)."""
     if not background:
-        return None, False, None, None
+        return None, "exact", None, None
 
     import h5py
     import numpy as np
 
+    # Count louder background events in chunks; the array can be billions of
+    # rows (GB), so never load it whole on a worker.
+    n_louder = 0
     with h5py.File(background, "r") as f:
-        bg_scores = f["parameters"]["detection_statistic"][:]
+        dset = f["parameters"]["detection_statistic"]
         Tb = float(f.attrs["Tb"])
+        is_tail = bool(f.attrs.get("is_tail", 0))
+        tail_min = float(f.attrs["tail_min"]) if is_tail else None
+        step = 20_000_000
+        for i in range(0, dset.shape[0], step):
+            block = dset[i : i + step]
+            n_louder += int(np.count_nonzero(block >= loudest))
 
-    n_louder = int(np.sum(bg_scores >= loudest))
+    # A tail file dropped every event below tail_min; a candidate below that
+    # cutoff has an incomplete count, so its FAR is only a lower bound.
+    if is_tail and loudest < tail_min:
+        return (n_louder / Tb) * SECONDS_PER_YEAR, "lower", n_louder, Tb
     if n_louder == 0:
-        return (1.0 / Tb) * SECONDS_PER_YEAR, True, 0, Tb
-    return (n_louder / Tb) * SECONDS_PER_YEAR, False, n_louder, Tb
+        return (1.0 / Tb) * SECONDS_PER_YEAR, "upper", 0, Tb
+    return (n_louder / Tb) * SECONDS_PER_YEAR, "exact", n_louder, Tb
 
 
 def _score_plot(series, t_event, resource_id):
@@ -130,6 +144,9 @@ def _score_plot(series, t_event, resource_id):
 
 def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
     params = inputs.get("analysis_parameters") or {}
+    # A gcn_event trigger carries its GPS time; fall back to it when unset.
+    if params.get("t_event") in (None, ""):
+        params["t_event"] = (inputs.get("gcn_event") or {}).get("gps")
     if params.get("t_event") in (None, ""):
         return {"status": "failure", "message": "aframe needs a `t_event` GPS time."}
 
@@ -159,7 +176,7 @@ def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
         from pathlib import Path
 
         background = "background.hdf5" if Path("background.hdf5").exists() else None
-    far, is_ul, n_louder, Tb = _compute_far(loudest, background)
+    far, bound, n_louder, Tb = _compute_far(loudest, background)
 
     plot_file = _score_plot(series, t_event, resource_id)
 
@@ -168,11 +185,12 @@ def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
         "ifos": list(ifos),
         "detection_statistic": loudest,
         "far_per_yr": far,
-        "far_is_upper_limit": is_ul,
+        "far_bound": bound,
+        "far_is_upper_limit": bound == "upper",
         "n_louder": n_louder,
         "background_livetime_s": Tb,
     }
-    op = "<" if is_ul else "="
+    op = {"upper": "<", "lower": ">", "exact": "="}[bound]
     message = (
         f"aframe stat={loudest:.4g}, FAR {op} {far:.3g} yr^-1"
         if far is not None
@@ -184,7 +202,8 @@ def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
             "data": {
                 "aframe_detection_statistic": loudest,
                 "aframe_far_per_yr": far,
-                "aframe_far_is_upper_limit": is_ul,
+                "aframe_far_bound": bound,
+                "aframe_far_is_upper_limit": bound == "upper",
             },
         }
     ]
