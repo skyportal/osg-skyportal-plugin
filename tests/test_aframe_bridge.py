@@ -15,5 +15,5 @@ def test_ifos_parsing():
 
 
 def test_compute_far_no_background():
-    far, is_ul, n_louder, Tb = aframe_bridge._compute_far(5.0, None)
-    assert far is None and is_ul is False and n_louder is None and Tb is None
+    far, bound, n_louder, Tb = aframe_bridge._compute_far(5.0, None)
+    assert far is None and bound is None and n_louder is None and Tb is None

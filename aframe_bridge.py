@@ -85,12 +85,12 @@ def _run_inference(model, data, t0, t_event):
 
 
 def _compute_far(loudest, background):
-    """(far_per_yr, bound, n_louder, Tb) from a background hdf5, or a None FAR
-    when no background is given. ``bound`` is "exact", "upper" (zero louder
-    events, so the FAR is an upper limit), or "lower" (a --top-k tail file whose
-    cutoff sits above this candidate, so the true FAR can only be larger)."""
+    """(far_per_yr, bound, n_louder, Tb) from a background hdf5, or all None when
+    no background is given. ``bound`` is "exact", "upper" (zero louder events, so
+    the FAR is an upper limit), or "lower" (a --top-k tail file whose cutoff sits
+    above this candidate, so the true FAR can only be larger)."""
     if not background:
-        return None, "exact", None, None
+        return None, None, None, None
 
     import h5py
     import numpy as np
@@ -190,12 +190,11 @@ def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
         "n_louder": n_louder,
         "background_livetime_s": Tb,
     }
-    op = {"upper": "<", "lower": ">", "exact": "="}[bound]
-    message = (
-        f"aframe stat={loudest:.4g}, FAR {op} {far:.3g} yr^-1"
-        if far is not None
-        else f"aframe stat={loudest:.4g} (no background; FAR n/a)"
-    )
+    if far is not None:
+        op = {"upper": "<", "lower": ">", "exact": "="}[bound]
+        message = f"aframe stat={loudest:.4g}, FAR {op} {far:.3g} yr^-1"
+    else:
+        message = f"aframe stat={loudest:.4g} (no background; FAR n/a)"
     annotations = [
         {
             "origin": "aframe",
