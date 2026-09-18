@@ -1,0 +1,8 @@
+{"wrapper": ["flare"],
+ "singularity_image": ["osdf:///ospool/ap41/data/<user>/flare-v1.sif", "docker://ghcr.io/applecider-ml/flare:latest"],
+ "horizon_days": {"type": "number", "default": 100},
+ "context": ["live", "none"],
+ "base_rate": {"type": "number", "default": 0.0326},
+ "request_cpus": {"type": "number", "default": 1},
+ "request_memory": {"type": "number", "default": 2048},
+ "max_runtime_seconds": {"type": "number", "default": 900}}

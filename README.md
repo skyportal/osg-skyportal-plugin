@@ -76,6 +76,28 @@ node is not assumed to reach the archive — so it reuses the fiesta image rathe
 than needing one of its own. Only the delivered products travel (tens of MB);
 re-imaging from the raw ASDM would need CASA and is out of scope.
 
+### FLARE photometric classification and anomaly triage
+
+Runs the [FLARE](https://github.com/applecider-ml/flare) hierarchical classifier
+(SN Ia, SN CC, SLSN, AGN, TDE, CV) on the source's ZTF photometry with the
+catalogue context available at alert time, and returns calibrated probabilities,
+the 90% Mondrian prediction set, credibility, the anomaly energy with its
+percentile and novelty p-value, and a rule-based triage verdict (`ordinary`,
+`needs_spectrum`, `anomaly_review`, `likely_stellar_or_agn`, `insufficient_data`)
+as annotations. A SkyPortal redshift, when present, turns the pseudo-absolute
+magnitude into a real one. The classifier itself takes milliseconds; the job time
+is the catalogue queries (`context: none` skips them). LLM-driven triage is not
+wired here yet — it will hook into the SkyPortal assistant separately.
+
+```bash
+uv run python register_analysis_service.py \
+    --name FLARE_OSG --display "FLARE (OSG)" \
+    --listener-url http://<plugin-host>:7100/analysis/flare_osg \
+    --input-data-types photometry redshift \
+    --optional-params-json "$(cat examples/flare_osg_parameters.json)" \
+    --group-ids 1
+```
+
 ## How it works
 
 - Submits a wrapper job (e.g. `fiesta_wrapper.py` + `fiesta_bridge.py`) to the OSG AP.

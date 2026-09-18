@@ -240,6 +240,8 @@ WRAPPER_DEFAULT_IMAGE = {
     # docker:// not CVMFS: buoy lives in the image's /opt/env venv, which the
     # docker env puts on PATH but the CVMFS sandbox invocation does not.
     "aframe": "docker://ghcr.io/ml4gw/buoy/buoy:main",
+    # FLARE runtime (containers/flare.def): the package ships its own models.
+    "flare": "osdf:///ospool/ap41/data/michael.coughlin/flare-v1.sif",
 }
 
 
@@ -281,6 +283,7 @@ def _stage_wrapper_job(
         "snid",
         "alma",
         "aframe",
+        "flare",
     ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
         return {}, None
@@ -339,6 +342,13 @@ def _stage_wrapper_job(
         wrapper_files = [
             (plugin_dir / "aframe_wrapper.py").resolve(),
             (plugin_dir / "aframe_bridge.py").resolve(),
+        ]
+    elif wrapper == "flare":
+        # FLARE runtime image (containers/flare.def); classification, not a fit.
+        wrapper_name = "flare_wrapper.py"
+        wrapper_files = [
+            (plugin_dir / "flare_wrapper.py").resolve(),
+            (plugin_dir / "flare_bridge.py").resolve(),
         ]
     else:
         wrapper_name = "fiesta_wrapper.py"
@@ -1157,6 +1167,7 @@ class AnalysisHandler(tornado.web.RequestHandler):
         name = analysis_name.lower()
         inputs = data.get("inputs")
         if isinstance(inputs, dict):
+            inputs.setdefault("resource_id", data.get("resource_id"))
             params = inputs.setdefault("analysis_parameters", {})
             if isinstance(params, dict):
                 if "mosfit" in name:
@@ -1169,6 +1180,8 @@ class AnalysisHandler(tornado.web.RequestHandler):
                     params.setdefault("wrapper", "ngsf")
                 elif "snid" in name:
                     params.setdefault("wrapper", "snid")
+                elif "flare" in name:
+                    params.setdefault("wrapper", "flare")
                 elif "redback" in name:
                     params.setdefault("backend", "redback")
 
