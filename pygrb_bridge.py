@@ -72,7 +72,23 @@ _VALID_DETECTORS = {"H1", "L1", "V1", "K1", "G1"}
 
 
 def _params(payload: dict) -> dict:
-    return {**DEFAULTS, **(payload.get("analysis_parameters") or {})}
+    params = {**DEFAULTS, **(payload.get("analysis_parameters") or {})}
+    # A GCN-event analysis delivers the trigger time and sky position under
+    # "gcn_event"; use them as the search target unless the request set its own
+    # (e.g. the KN-fit path). The skymap reference travels too, unused for now.
+    gcn = payload.get("gcn_event") or {}
+    if (
+        gcn.get("gps") is not None
+        and params.get("trigger_time") is None
+        and not params.get("t0_samples")
+    ):
+        params["trigger_time"] = float(gcn["gps"])
+        params["time_format"] = "gps"
+    if gcn.get("ra") is not None:
+        params.setdefault("ra", gcn["ra"])
+    if gcn.get("dec") is not None:
+        params.setdefault("dec", gcn["dec"])
+    return params
 
 
 # Chirp-mass priors by inferred merger type (a KN implies a compact-object merger).

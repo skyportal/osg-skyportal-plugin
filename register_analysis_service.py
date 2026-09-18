@@ -38,9 +38,9 @@ def parse_args():
     )
     p.add_argument(
         "--input-data-types",
-        nargs="+",
+        nargs="*",
         default=["photometry", "redshift"],
-        help="SkyPortal input_data_types",
+        help="SkyPortal input_data_types (pass with no values for gcn_event services)",
     )
     p.add_argument(
         "--optional-params-json",
@@ -49,6 +49,36 @@ def parse_args():
         help="optional_analysis_parameters as JSON (string of dict)",
     )
     p.add_argument("--group-ids", nargs="+", type=int, default=[])
+    # Optionally also create a DefaultAnalysis so the service runs automatically.
+    p.add_argument(
+        "--default",
+        action="store_true",
+        help="Also create/update a DefaultAnalysis for this service.",
+    )
+    p.add_argument(
+        "--analysis-resource-type",
+        default="obj",
+        choices=["obj", "gcn_event"],
+        help="Resource the default triggers on (default: obj).",
+    )
+    p.add_argument(
+        "--default-gcn-tags",
+        nargs="+",
+        default=[],
+        help="gcn_event default: run when the event carries any of these tags, e.g. GRB.",
+    )
+    p.add_argument(
+        "--default-notice-types",
+        nargs="+",
+        default=[],
+        help="gcn_event default: run when the event carries any of these notice types.",
+    )
+    p.add_argument(
+        "--default-params-json",
+        default="{}",
+        help="default_analysis_parameters as JSON (string of dict).",
+    )
+    p.add_argument("--daily-limit", type=int, default=10, help="Max default runs per day.")
     p.add_argument("--token", default=None, help="SkyPortal API token (else from config)")
     p.add_argument("--base-url", default=None, help="SkyPortal base URL (else from config)")
     p.add_argument(
@@ -111,17 +141,42 @@ def main():
     )
 
     if match:
+        service_id = match["id"]
         r = requests.patch(
-            f"{base}/api/analysis_service/{match['id']}",
+            f"{base}/api/analysis_service/{service_id}",
             json=body,
             headers=headers,
             timeout=30,
         )
-        print(f"updated {args.name} (id {match['id']}) -- HTTP {r.status_code}: {r.text}")
+        print(f"updated {args.name} (id {service_id}) -- HTTP {r.status_code}: {r.text}")
     else:
         r = requests.post(f"{base}/api/analysis_service", json=body, headers=headers, timeout=30)
         print(f"registered {args.name} -- HTTP {r.status_code}: {r.text}")
     r.raise_for_status()
+    if not match:
+        service_id = r.json()["data"]["id"]
+
+    if args.default:
+        source_filter = {}
+        if args.default_gcn_tags:
+            source_filter["gcn_tags"] = args.default_gcn_tags
+        if args.default_notice_types:
+            source_filter["notice_types"] = args.default_notice_types
+        default_body = {
+            "analysis_resource_type": args.analysis_resource_type,
+            "source_filter": source_filter,
+            "default_analysis_parameters": json.loads(args.default_params_json),
+            "daily_limit": args.daily_limit,
+            "group_ids": args.group_ids or None,
+        }
+        d = requests.post(
+            f"{base}/api/analysis_service/{service_id}/default_analysis",
+            json=default_body,
+            headers=headers,
+            timeout=30,
+        )
+        print(f"default analysis for {args.name} -- HTTP {d.status_code}: {d.text}")
+        d.raise_for_status()
 
 
 if __name__ == "__main__":

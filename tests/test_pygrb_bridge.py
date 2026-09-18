@@ -42,6 +42,33 @@ def test_validate_requires_trigger_time():
         pygrb_bridge.validate_inputs(p)
 
 
+def test_gcn_event_seeds_trigger_and_sky():
+    # A GRB gcn_event analysis delivers the trigger + position, no request params.
+    payload = {"gcn_event": {"gps": 1187008884.0, "ra": 197.45, "dec": -23.38}}
+    params = pygrb_bridge._params(payload)
+    assert params["trigger_time"] == 1187008884.0 and params["time_format"] == "gps"
+    info = pygrb_bridge.validate_inputs(payload)
+    assert info["trigger_gps"] == 1187008884.0
+    ra, dec = pygrb_bridge._resolve_sky(payload, params)
+    assert ra > 0 and dec < 0  # resolved from the gcn_event position
+
+
+def test_request_params_override_gcn_event():
+    # The KN-fit path (explicit params) wins over the gcn_event fallback.
+    payload = {
+        "gcn_event": {"gps": 1187008884.0, "ra": 1.0, "dec": 2.0},
+        "analysis_parameters": {
+            "trigger_time": 60000.0,
+            "time_format": "mjd",
+            "ra": 10.0,
+            "dec": 20.0,
+        },
+    }
+    params = pygrb_bridge._params(payload)
+    assert params["trigger_time"] == 60000.0 and params["time_format"] == "mjd"
+    assert params["ra"] == 10.0 and params["dec"] == 20.0
+
+
 def test_validate_filters_unknown_detectors():
     info = pygrb_bridge.validate_inputs(_payload(detectors=["H1", "L1", "XX", "foo"]))
     assert info["detectors"] == ["H1", "L1"]
