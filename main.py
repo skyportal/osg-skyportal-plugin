@@ -157,18 +157,21 @@ def _commit_submit(schedd, sub, spool: bool) -> int:
     return result.cluster()
 
 
-def get_schedd(cfg: dict):
-    """Connect to the configured Condor schedd. SciToken via BEARER_TOKEN_FILE."""
+def get_schedd(cfg: dict, ap: dict | None = None):
+    """Connect to a Condor schedd. ``ap`` (e.g. the IGWN AP for GW jobs) overrides
+    collector/schedd/scitoken_path; unset falls back to ``cfg['htcondor']``.
+    SciToken via BEARER_TOKEN_FILE."""
     htcondor = _htcondor()
+    ap = ap or {}
 
-    token_path = os.path.expanduser(cfg["htcondor"]["scitoken_path"])
+    token_path = os.path.expanduser(ap.get("scitoken_path") or cfg["htcondor"]["scitoken_path"])
     if os.path.exists(token_path):
         os.environ["BEARER_TOKEN_FILE"] = token_path
     else:
         log(f"warning: SciToken not found at {token_path}; using whatever creds htcondor finds")
 
-    collector_host = cfg["htcondor"].get("collector")
-    schedd_name = cfg["htcondor"].get("schedd")
+    collector_host = ap.get("collector") or cfg["htcondor"].get("collector")
+    schedd_name = ap.get("schedd") or cfg["htcondor"].get("schedd")
     if collector_host is None:
         return htcondor.Schedd()
     # Try each collector in turn. A dead collector makes locate() return None
@@ -516,9 +519,15 @@ def submit_job(
     htcondor = _htcondor()
 
     defaults = cfg["defaults"]
-    schedd = get_schedd(cfg)
-
     params = inputs.get("analysis_parameters", {}) or {}
+
+    # Route the GW targeted searches (pygrb/aframe) to the IGWN AP so the job gets
+    # a frames/gwdatafind scitoken; every other wrapper stays on the default AP.
+    wrapper = str(params.get("wrapper", "")).strip().lower()
+    igwn = cfg.get("igwn") or {}
+    igwn_ap = igwn if wrapper in (igwn.get("wrappers") or []) else None
+    schedd = get_schedd(cfg, ap=igwn_ap)
+
     cluster_uuid = uuid.uuid4().hex
     wrapper_overrides, osdf_output_url = _stage_wrapper_job(cfg, params, inputs, cluster_uuid)
 
@@ -558,7 +567,9 @@ def submit_job(
         int(params.get("max_runtime_seconds", defaults["max_runtime_seconds"]))
     )
     _apply_gpu_and_image(submit_desc, params, defaults)
-    _apply_igwn_ap(submit_desc, params, defaults)
+    # For IGWN-AP jobs the use_oauth_services/accounting/pools knobs come from the
+    # igwn config block (a request param still wins).
+    _apply_igwn_ap(submit_desc, params, {**defaults, **igwn} if igwn_ap else defaults)
     submit_desc.update(wrapper_overrides)
     # Round-trip the SkyPortal binding through the schedd so we can rehydrate after restart.
     submit_desc["+SkyPortalAnalysisName"] = f'"{analysis_name}"'
@@ -1199,7 +1210,10 @@ class AnalysisHandler(tornado.web.RequestHandler):
             .strip()
             .lower()
         )
-        batchable = wrapper_name != "alma"
+        # GW searches submit to the IGWN AP (per-wrapper routing in submit_job),
+        # so they take the direct path, not the shared-signature batch flush.
+        igwn_wrappers = set((self.cfg.get("igwn") or {}).get("wrappers") or [])
+        batchable = wrapper_name != "alma" and wrapper_name not in igwn_wrappers
         if (
             batchable
             and (self.cfg.get("batch") or {}).get("enabled", False)

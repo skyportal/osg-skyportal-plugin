@@ -67,6 +67,22 @@ services:
                     accounting_group: ""        # e.g. "ligo.dev.o4.burst.allsky.stamp"
                     accounting_group_user: ""   # e.g. "michael.coughlin" (the AP user)
                     pools: ""                   # e.g. "IGWN,CIT"
+                igwn:
+                    # Per-wrapper routing to an IGWN-credentialed AP (e.g. AP42) so
+                    # the GW searches get a frames/gwdatafind scitoken and can read
+                    # real strain over OSDF; every other wrapper stays on the default
+                    # htcondor AP. Empty `wrappers` = off (all jobs on the default AP).
+                    wrappers: []                # e.g. ["pygrb", "aframe"]
+                    collector: null             # the IGWN AP collector host (e.g. ap42...)
+                    schedd: null                # the IGWN AP schedd name
+                    scitoken_path: null         # IDTOKEN for submitting to that AP
+                    use_oauth_services: scitokens   # AP mints read:/frames + gwdatafind.read
+                    accounting_group: ""        # e.g. "ligo.dev.o4.burst.allsky.stamp"
+                    accounting_group_user: ""   # the AP user
+                    pools: ""                   # e.g. "IGWN,CIT" (blank flocks to OSPool)
+                    # NOTE: the read-side poller uses the default AP; a job on the
+                    # IGWN AP still reports results via its webhook callback, but its
+                    # held/timeout state is not tracked by the plugin poller.
                 poller:
                     # Seconds between condor_q sweeps. Bursty workloads → drop to 10-30.
                     interval_seconds: 60
