@@ -408,24 +408,19 @@ def _stage_wrapper_job(
         alma_staged_bytes = sum(p.stat().st_size for p in staged if p.exists())
 
     # aframe needs its weights + config (and an optional FAR background) on the
-    # worker. Copy the configured files in under the canonical basenames the
-    # bridge expects, so a renamed source file still lands as aframe.pt etc.
+    # worker, under the canonical basenames the bridge expects. Sources may be
+    # local paths or OSDF/HTTPS URLs (fetched here), so the files need not live in
+    # the repo or the pod.
     if wrapper == "aframe":
-        import shutil
+        import aframe_staging
 
-        aframe_cfg = cfg.get("aframe") or {}
-        for key, dest in (
-            ("weights", "aframe.pt"),
-            ("config", "aframe_config_bbh.yaml"),
-            ("background", "background.hdf5"),
-        ):
-            src = aframe_cfg.get(key)
-            if src and Path(src).exists():
-                target = job_dir / dest
-                shutil.copy(src, target)
-                transfer.append(str(target))
-            elif key != "background":
-                log(f"aframe: no `{key}` configured (aframe.{key}); the job will fail without it")
+        read_token = (cfg.get("osdf") or {}).get("read_token_path")
+        transfer += [
+            str(p)
+            for p in aframe_staging.stage_models(
+                cfg.get("aframe") or {}, job_dir, read_token, log=log
+            )
+        ]
 
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
     # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).

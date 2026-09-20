@@ -115,9 +115,12 @@ services:
                 aframe:
                     # aframe model files, staged with the job under the canonical
                     # basenames aframe.pt / aframe_config_bbh.yaml / background.hdf5.
-                    weights: null       # path to the aframe weights (.pt)
-                    config: null        # path to the aframe config yaml
-                    background: null    # timeslide background hdf5 for the FAR (optional)
+                    # Each may be a local path or an OSDF/HTTPS URL (fetched at
+                    # submit time via osdf.read_token_path), so the files need not
+                    # live in the repo or the pod.
+                    weights: null       # local path or OSDF URL for the aframe weights (.pt)
+                    config: null        # local path or OSDF URL for the aframe config yaml
+                    background: null    # local path or OSDF URL for the FAR background hdf5 (optional)
                 # Per-job scratch dir (inputs.json, etc.). Created on demand.
                 staging_dir: staging
                 auth:
