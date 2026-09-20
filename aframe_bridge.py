@@ -37,9 +37,21 @@ def _ifos(params):
     return tuple(val)
 
 
-def _fetch_onsource(t_event, model, ifos, pad):
-    """GWOSC open strain spanning the model's minimum window around t_event,
-    resampled to the model rate. Returns (data_tensor (1, n_ifos, N), t0)."""
+def _per_ifo(params, key, default_template, ifo):
+    """A per-detector value: a dict keyed by ifo, a `{ifo}` template, or the default."""
+    val = params.get(key)
+    if isinstance(val, dict):
+        return val.get(ifo, default_template.format(ifo=ifo))
+    if isinstance(val, str) and val:
+        return val.format(ifo=ifo)
+    return default_template.format(ifo=ifo)
+
+
+def _fetch_onsource(t_event, model, ifos, pad, params):
+    """Strain spanning the model's minimum window around t_event, resampled to the
+    model rate. ``data_source`` selects real IGWN strain over OSDF (``gwdatafind``,
+    the OSG path -- needs the job scitoken) or public open data (``gwosc``).
+    Returns (data_tensor (1, n_ifos, N), t0)."""
     import numpy as np
     import torch
     from gwpy.timeseries import TimeSeries
@@ -47,10 +59,34 @@ def _fetch_onsource(t_event, model, ifos, pad):
     min_duration = model.minimum_data_size / model.sample_rate
     fetch_start = t_event - min_duration - pad
     fetch_end = t_event + pad
+    source = str(params.get("data_source", "gwosc")).lower()
 
     series = []
     for ifo in ifos:
-        ts = TimeSeries.fetch_open_data(ifo, fetch_start, fetch_end)
+        if source in ("gwdatafind", "osdf", "igwn"):
+            import igwn_strain  # shipped per-job
+
+            frametype = _per_ifo(params, "frametype", "{ifo}_HOFT_C00", ifo)
+            channel = _per_ifo(params, "channel", "{ifo}:GDS-CALIB_STRAIN", ifo)
+            host = params.get("gwdatafind_host") or igwn_strain.DEFAULT_GWDATAFIND_HOST
+            frames = igwn_strain.fetch_frames(
+                ifo[0],
+                frametype,
+                int(fetch_start) - 1,
+                int(fetch_end) + 1,
+                outdir="frames",
+                host=host,
+            )
+            if not frames:
+                raise ValueError(
+                    f"no {frametype} strain available for {ifo} at GPS "
+                    f"[{int(fetch_start)},{int(fetch_end)}] (no data at this epoch)"
+                )
+            ts = TimeSeries.read(
+                [str(f) for f in frames], channel, start=fetch_start, end=fetch_end
+            )
+        else:
+            ts = TimeSeries.fetch_open_data(ifo, fetch_start, fetch_end)
         series.append(ts.resample(model.sample_rate))
 
     n = min(len(ts.value) for ts in series)  # guard off-by-one across detectors
@@ -164,7 +200,7 @@ def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
         load_weights=True,
     )
 
-    data, t0 = _fetch_onsource(t_event, model, ifos, pad)
+    data, t0 = _fetch_onsource(t_event, model, ifos, pad, params)
     series = _run_inference(model, data, t0, t_event)
 
     # Loudest on-source statistic: max significance-integrated score over the

@@ -35,8 +35,15 @@ from typing import Any
 # targeted-search use case): low f_lower, TaylorF2, 1.4-1.4 Msun template.
 DEFAULTS: dict[str, Any] = {
     "detectors": ["H1", "L1", "V1"],
-    "data_source": "gwosc",  # Phase 1: public open data
-    "event_name": None,  # GWOSC event (e.g. "GW170817") for the Phase 1 fetch
+    # "gwdatafind": real IGWN strain over OSDF (needs the IGWN AP + scitoken);
+    # "gwosc": public named-event strain (self-contained Phase-1 test).
+    "data_source": "gwosc",
+    "event_name": None,  # GWOSC event (e.g. "GW170817") for the gwosc fetch
+    "gwdatafind_host": "datafind.igwn.org",  # gwdatafind server for data_source=gwdatafind
+    # Per-detector frametype/channel for gwdatafind; a "{ifo}" template or a
+    # {ifo: value} dict. Defaults: "{ifo}_HOFT_C00" / "{ifo}:GDS-CALIB_STRAIN".
+    "frametype": None,
+    "channel": None,
     "time_format": "gps",  # "gps" or "mjd" (the KN fit reports T0 in MJD)
     "approximant": "TaylorF2",
     "mass1": 1.4,
@@ -253,26 +260,61 @@ def _apply_gates(data, ifo: str, gates):
     return data
 
 
-def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, event_name):
-    """Public GWOSC strain for one detector, sliced to [start, end] and resampled.
+def _per_ifo(params: dict, key: str, default_template: str, ifo: str) -> str:
+    """A per-detector value: a dict keyed by ifo, or a `{ifo}` template string,
+    else the default template."""
+    val = params.get(key)
+    if isinstance(val, dict):
+        return val.get(ifo, default_template.format(ifo=ifo))
+    if isinstance(val, str) and val:
+        return val.format(ifo=ifo)
+    return default_template.format(ifo=ifo)
 
-    Phase 1 uses ``pycbc.catalog.Merger`` (named GWOSC events), which is what ships
-    in the image. GWOSC serves 32 s or 4096 s files; pick the smallest that covers
-    the requested span. Arbitrary-GPS/non-public strain is Phase 2 via
-    gwdatafind/OSDF (needs the IGWN-credentialed AP)."""
-    from pycbc.catalog import Merger  # lazy; ships in the pycbc image
+
+def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, params: dict):
+    """Strain for one detector over [start, end], resampled. ``data_source`` selects:
+    - ``gwdatafind``: real IGWN strain over OSDF (gwdatafind + pelican), the OSG path
+      -- needs the job's scitoken (submit to the IGWN AP with use_oauth_services);
+    - ``gwosc``: public GWOSC named-event strain, the self-contained Phase-1 test."""
     from pycbc.filter import resample_to_delta_t
 
+    target_dt = 1.0 / sample_rate
+    source = str(params.get("data_source", "gwosc")).lower()
+
+    if source in ("gwdatafind", "osdf", "igwn"):
+        from pycbc.frame import read_frame
+
+        import igwn_strain  # shipped per-job
+
+        frametype = _per_ifo(params, "frametype", "{ifo}_HOFT_C00", ifo)
+        channel = _per_ifo(params, "channel", "{ifo}:GDS-CALIB_STRAIN", ifo)
+        host = params.get("gwdatafind_host") or igwn_strain.DEFAULT_GWDATAFIND_HOST
+        # Pad the discovery window so a frame boundary never clips the request.
+        frames = igwn_strain.fetch_frames(
+            ifo[0], frametype, int(start) - 1, int(end) + 1, outdir="frames", host=host
+        )
+        if not frames:
+            raise ValueError(
+                f"no {frametype} strain available for {ifo} at GPS "
+                f"[{int(start)},{int(end)}] (no data at this epoch, e.g. no active run)"
+            )
+        ts = read_frame([str(f) for f in frames], channel, start_time=start, end_time=end)
+        if abs(ts.delta_t - target_dt) > 1e-12:
+            ts = resample_to_delta_t(ts, target_dt)
+        return ts
+
+    from pycbc.catalog import Merger  # lazy; ships in the pycbc image
+
+    event_name = params.get("event_name")
     if not event_name:
         raise ValueError(
-            "pygrb Phase 1 needs analysis_parameters.event_name (a GWOSC event); "
-            "arbitrary-GPS fetch is Phase 2 (gwdatafind/OSDF, IGWN credentials)"
+            "pygrb data_source=gwosc needs analysis_parameters.event_name (a GWOSC "
+            "event); for real OSG strain set data_source=gwdatafind (IGWN AP + scitoken)"
         )
     gwosc_duration = 32 if (end - start) <= 28 else 4096
     # GWOSC native rate is 4096 Hz; fetch that then resample to the analysis rate.
     ts = Merger(event_name).strain(ifo, duration=gwosc_duration, sample_rate=4096)
     ts = ts.time_slice(start, end)
-    target_dt = 1.0 / sample_rate
     if abs(ts.delta_t - target_dt) > 1e-12:
         ts = resample_to_delta_t(ts, target_dt)
     return ts
@@ -380,9 +422,8 @@ def _coherent_search(
 
     # Condition each detector's data once; every template reuses it.
     cond = {}
-    event_name = params.get("event_name")
     for ifo in dets:
-        data = _fetch_strain(ifo, start, end, srate, event_name)
+        data = _fetch_strain(ifo, start, end, srate, params)
         data = data.highpass_fir(f_low, 512)
         data = _apply_gates(data, ifo, params.get("gates"))
         psd = interpolate(data.psd(4), data.delta_f)

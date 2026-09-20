@@ -315,6 +315,7 @@ def _stage_wrapper_job(
         wrapper_files = [
             (plugin_dir / "pygrb_wrapper.py").resolve(),
             (plugin_dir / "pygrb_bridge.py").resolve(),
+            (plugin_dir / "igwn_strain.py").resolve(),
         ]
     elif wrapper == "ngsf":
         wrapper_name = "ngsf_wrapper.py"
@@ -342,6 +343,7 @@ def _stage_wrapper_job(
         wrapper_files = [
             (plugin_dir / "aframe_wrapper.py").resolve(),
             (plugin_dir / "aframe_bridge.py").resolve(),
+            (plugin_dir / "igwn_strain.py").resolve(),
         ]
     elif wrapper == "flare":
         # FLARE runtime image (containers/flare.def); classification, not a fit.
