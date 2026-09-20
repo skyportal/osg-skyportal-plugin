@@ -16,3 +16,4 @@ staging/
 /photometry.csv
 /redshift.csv
 .claude/
+aframe/
