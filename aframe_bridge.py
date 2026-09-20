@@ -181,10 +181,15 @@ def _score_plot(series, t_event, resource_id):
 def run_from_skyportal_inputs(inputs: dict, resource_id: str = "obj") -> dict:
     params = inputs.get("analysis_parameters") or {}
     # A gcn_event trigger carries its GPS time; fall back to it when unset.
+    gcn = inputs.get("gcn_event") or {}
     if params.get("t_event") in (None, ""):
-        params["t_event"] = (inputs.get("gcn_event") or {}).get("gps")
+        params["t_event"] = gcn.get("gps")
     if params.get("t_event") in (None, ""):
         return {"status": "failure", "message": "aframe needs a `t_event` GPS time."}
+    # A live event has no GWOSC open-data window, so default to real strain over
+    # gwdatafind unless the request chose a source explicitly.
+    if gcn.get("gps") is not None and "data_source" not in params:
+        params["data_source"] = "gwdatafind"
 
     import numpy as np
     from buoy import Aframe

@@ -95,6 +95,11 @@ def _params(payload: dict) -> dict:
         params.setdefault("ra", gcn["ra"])
     if gcn.get("dec") is not None:
         params.setdefault("dec", gcn["dec"])
+    # A live event has no GWOSC named-event, so default it to real strain over
+    # gwdatafind unless the request chose a source explicitly.
+    req = payload.get("analysis_parameters") or {}
+    if gcn.get("gps") is not None and "data_source" not in req:
+        params["data_source"] = "gwdatafind"
     return params
 
 

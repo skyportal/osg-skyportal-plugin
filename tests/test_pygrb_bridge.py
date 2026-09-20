@@ -51,6 +51,15 @@ def test_gcn_event_seeds_trigger_and_sky():
     assert info["trigger_gps"] == 1187008884.0
     ra, dec = pygrb_bridge._resolve_sky(payload, params)
     assert ra > 0 and dec < 0  # resolved from the gcn_event position
+    assert params["data_source"] == "gwdatafind"  # live event -> real strain
+
+
+def test_request_data_source_wins_over_gcn_default():
+    payload = {
+        "gcn_event": {"gps": 1187008884.0},
+        "analysis_parameters": {"data_source": "gwosc", "event_name": "GW170817"},
+    }
+    assert pygrb_bridge._params(payload)["data_source"] == "gwosc"
 
 
 def test_request_params_override_gcn_event():
