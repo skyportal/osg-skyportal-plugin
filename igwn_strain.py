@@ -2,8 +2,11 @@
 gwdatafind and pull them with Pelican. Prefer the job image's own tools (the
 pycbc image ships gwdatafind + pelican) so a worker never cold-loads the large
 CVMFS igwn conda env — that cold-load, not the ~64 MB/s transfer, is what makes
-naive runs crawl. The CVMFS env is only a fallback for images missing a tool.
-Authenticated by the job's ``use_oauth_services`` scitoken.
+naive runs crawl. For an OSDF client the order is: in-image ``pelican`` CLI, a
+static ``pelican`` shipped with the job (for images like buoy that lack one),
+``pelicanfs`` (the Python client, once the image adds it), then the CVMFS env —
+which isn't mounted on every OSPool node. Authenticated by the job's
+``use_oauth_services`` scitoken.
 
 Shipped alongside the stdlib-only bridges, so nothing heavy is imported at load.
 """
@@ -38,9 +41,19 @@ def _igwn_python() -> str:
     return p if os.path.exists(p) else "python3"
 
 
-def _pelican() -> str:
-    # An in-image pelican (pycbc) wins; else the CVMFS env's (buoy has none).
-    return shutil.which("pelican") or f"{IGWN_ENV}/bin/pelican"
+def _pelican_exe():
+    """A usable pelican CLI, or None. In-image wins (pycbc ships one); else a
+    binary shipped with the job (./pelican, for images like buoy that lack it);
+    else the CVMFS env's, which isn't mounted on every OSPool node."""
+    exe = shutil.which("pelican")
+    if exe:
+        return exe
+    shipped = Path.cwd() / "pelican"
+    if shipped.exists():
+        shipped.chmod(0o755)  # the executable bit may not survive file transfer
+        return str(shipped)
+    cvmfs = f"{IGWN_ENV}/bin/pelican"
+    return cvmfs if os.path.exists(cvmfs) else None
 
 
 def _token_env() -> dict:
@@ -101,17 +114,43 @@ def find_osdf_urls(observatory, frametype, start, end, host=DEFAULT_GWDATAFIND_H
     return json.loads(r.stdout.strip() or "[]")
 
 
-def _pelican_get(url, dest, env):
-    r = subprocess.run(
-        [_pelican(), "object", "get", url, str(dest)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=900,
-    )
-    if r.returncode != 0 or not Path(dest).exists():
-        raise RuntimeError(f"pelican get failed for {url}: {r.stderr.strip()[:300]}")
+def _pelicanfs_get(url, dest, env):
+    """Fetch via pelicanfs (fsspec) — the Python OSDF client. No CLI, no CVMFS;
+    used when the image ships pelicanfs (e.g. buoy, once added)."""
+    import fsspec  # pelicanfs registers the osdf:// protocol on import
+    import pelicanfs  # noqa: F401 — import for the side-effect of registration
+
+    tok = env.get("BEARER_TOKEN_FILE")
+    if tok:
+        os.environ["BEARER_TOKEN_FILE"] = tok  # pelicanfs reads it via igwn-auth-utils
+    with fsspec.open(url, "rb") as src, open(dest, "wb") as out:
+        shutil.copyfileobj(src, out)
+    if not Path(dest).exists():
+        raise RuntimeError(f"pelicanfs get produced no file for {url}")
     return Path(dest)
+
+
+def _pelican_get(url, dest, env):
+    """Pull one frame over OSDF. Prefer a pelican CLI; fall back to pelicanfs
+    (Python) so an image with neither the CLI nor CVMFS still works."""
+    exe = _pelican_exe()
+    if exe:
+        r = subprocess.run(
+            [exe, "object", "get", url, str(dest)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=900,
+        )
+        if r.returncode == 0 and Path(dest).exists():
+            return Path(dest)
+        cli_err = r.stderr.strip()[:300]
+    else:
+        cli_err = "no pelican CLI available"
+    try:
+        return _pelicanfs_get(url, dest, env)
+    except ImportError:
+        raise RuntimeError(f"pelican get failed for {url}: {cli_err}") from None
 
 
 def fetch_frames(observatory, frametype, start, end, outdir, host=DEFAULT_GWDATAFIND_HOST):

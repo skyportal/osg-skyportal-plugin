@@ -68,6 +68,46 @@ def test_find_osdf_urls_raises_on_failure(monkeypatch):
         assert "gwdatafind" in str(e)
 
 
+def test_pelican_exe_prefers_shipped_binary(monkeypatch, tmp_path):
+    # No in-image pelican -> use a ./pelican shipped with the job (buoy has none).
+    monkeypatch.setattr(igwn_strain.shutil, "which", lambda _: None)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pelican").write_bytes(b"#!/bin/true\n")
+    assert igwn_strain._pelican_exe() == str(tmp_path / "pelican")
+
+
+def test_pelican_get_falls_back_to_pelicanfs(monkeypatch, tmp_path):
+    # No CLI anywhere -> pelicanfs (Python) is used.
+    monkeypatch.setattr(igwn_strain, "_pelican_exe", lambda: None)
+    dest = tmp_path / "H-a-4096.gwf"
+    called = {}
+
+    def fake_pfs(url, d, env):
+        from pathlib import Path
+
+        Path(d).write_bytes(b"gwf")
+        called["url"] = url
+        return Path(d)
+
+    monkeypatch.setattr(igwn_strain, "_pelicanfs_get", fake_pfs)
+    out = igwn_strain._pelican_get("osdf:///x/H-a-4096.gwf", dest, {})
+    assert out == dest and called["url"] == "osdf:///x/H-a-4096.gwf"
+
+
+def test_pelican_get_raises_when_no_client(monkeypatch, tmp_path):
+    monkeypatch.setattr(igwn_strain, "_pelican_exe", lambda: None)
+
+    def no_pfs(*a, **k):
+        raise ImportError("no pelicanfs")
+
+    monkeypatch.setattr(igwn_strain, "_pelicanfs_get", no_pfs)
+    try:
+        igwn_strain._pelican_get("osdf:///x/y.gwf", tmp_path / "y.gwf", {})
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "pelican get failed" in str(e)
+
+
 def test_fetch_frames_empty_when_no_urls(monkeypatch, tmp_path):
     monkeypatch.setattr(igwn_strain, "find_osdf_urls", lambda *a, **k: [])
     assert igwn_strain.fetch_frames("H", "H1_HOFT_C00", 1000, 1064, tmp_path) == []
