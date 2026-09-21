@@ -80,6 +80,9 @@ class JobRecord:
     osdf_output_url: str | None = None
     spooled: bool = False
     inputs: dict[str, Any] = field(default_factory=dict)
+    # The AP this job was submitted to (IGWN AP for GW searches); None = default
+    # schedd. The poller must query the same schedd it was submitted to.
+    ap: dict[str, Any] | None = None
 
 
 # In-memory job table, keyed (cluster_id, proc_id). Rebuilt from the schedd at
@@ -233,6 +236,9 @@ def ensure_keepalive(cfg: dict) -> None:
 # register-osg-services form defaults, so keep the two in sync. A wrapper absent
 # here falls back to the single global defaults.singularity_image.
 WRAPPER_DEFAULT_IMAGE = {
+    # pycbc's image ships pycbc under `python` (3.11); the coherent-search wrapper
+    # runs under `python`. gwdatafind/pelican come from the CVMFS igwn env.
+    "pygrb": "/cvmfs/singularity.opensciencegrid.org/pycbc/pycbc-el8:latest",
     "ngsf": "/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest",
     # docker:// not CVMFS: SNID needs its venv (/opt/venv/bin) on PATH, which the
     # docker image's env applies but the CVMFS sandbox invocation does not, so
@@ -245,6 +251,15 @@ WRAPPER_DEFAULT_IMAGE = {
     "aframe": "docker://ghcr.io/ml4gw/buoy/buoy:main",
     # FLARE runtime (containers/flare.def): the package ships its own models.
     "flare": "osdf:///ospool/ap41/data/michael.coughlin/flare-v1.sif",
+}
+
+# The GW searches pull whole .gwf frame files (O4 hoft frames are ~1.5 GB each,
+# H1+L1 with boundary spillover ~6 GB) plus the container, and the fetch + NN run
+# is slower than a light-curve fit, so they need far more than the defaults. MB /
+# seconds; a request param still wins.
+WRAPPER_DEFAULT_RESOURCES = {
+    "pygrb": {"request_disk": 16384, "request_memory": 8192, "max_runtime_seconds": 7200},
+    "aframe": {"request_disk": 16384, "request_memory": 8192, "max_runtime_seconds": 7200},
 }
 
 
@@ -531,6 +546,9 @@ def submit_job(
     cluster_uuid = uuid.uuid4().hex
     wrapper_overrides, osdf_output_url = _stage_wrapper_job(cfg, params, inputs, cluster_uuid)
 
+    # Per-wrapper resource floors (GW searches need more disk/memory/runtime).
+    res = {**defaults, **WRAPPER_DEFAULT_RESOURCES.get(wrapper, {})}
+
     submit_desc: dict[str, str] = {
         "executable": params.get("executable", "/bin/sleep"),
         # The executable lives on the worker / in the container; don't ship this
@@ -542,11 +560,11 @@ def submit_job(
         # AP home dir for remote OSPool submission, and the plugin doesn't use it.
         "output": "job.$(ClusterId).$(ProcId).out",
         "error": "job.$(ClusterId).$(ProcId).err",
-        "request_cpus": str(params.get("request_cpus", defaults["request_cpus"])),
+        "request_cpus": str(params.get("request_cpus", res["request_cpus"])),
         # Config values are MB; give explicit units since a bare RequestDisk is
         # KiB in HTCondor (RequestMemory is MiB) — easy to get wrong.
-        "request_memory": f"{params.get('request_memory', defaults['request_memory'])}MB",
-        "request_disk": f"{params.get('request_disk', defaults['request_disk'])}MB",
+        "request_memory": f"{params.get('request_memory', res['request_memory'])}MB",
+        "request_disk": f"{params.get('request_disk', res['request_disk'])}MB",
         "+ProjectName": f'"{cfg["htcondor"]["project_name"]}"',
         # Target OSPool's Linux/x86_64 glideins. Bindings submission from a
         # non-Linux host otherwise defaults requirements to the local platform.
@@ -564,7 +582,7 @@ def submit_job(
     if cpu_requirements:
         submit_desc["requirements"] += f" && {cpu_requirements}"
     submit_desc["+MaxRuntime"] = str(
-        int(params.get("max_runtime_seconds", defaults["max_runtime_seconds"]))
+        int(params.get("max_runtime_seconds", res["max_runtime_seconds"]))
     )
     _apply_gpu_and_image(submit_desc, params, defaults)
     # For IGWN-AP jobs the use_oauth_services/accounting/pools knobs come from the
@@ -605,6 +623,7 @@ def submit_job(
         osdf_output_url=osdf_output_url,
         spooled=needs_spool,
         inputs=inputs,
+        ap=igwn_ap,
     )
     log(f"submitted cluster_id={cluster_id} analysis={analysis_name} resource_id={resource_id}")
     return cluster_id
@@ -1062,15 +1081,32 @@ def post_callback(rec: JobRecord, cfg: dict | None = None) -> bool:
 
 
 def poll_once(cfg: dict) -> None:
-    """One sweep of the schedd + history for jobs we own; post callbacks for newly-terminal jobs."""
+    """One sweep of the schedd + history for jobs we own; post callbacks for newly-terminal jobs.
+    Jobs are grouped by the AP they were submitted to, since a GW search on the
+    IGWN AP is invisible on the default schedd (and would look 'removed')."""
     if not JOBS:
         return
-    schedd = get_schedd(cfg)
     # list() snapshots atomically (one C call) so a concurrent submit adding to
     # JOBS from _SUBMIT_POOL can't raise "dict changed size during iteration".
     open_keys = [k for k, r in list(JOBS.items()) if r.completed_at is None]
     if not open_keys:
         return
+    groups: dict[tuple, list] = {}
+    for k in open_keys:
+        ap = JOBS[k].ap
+        sig = (ap.get("collector"), ap.get("schedd")) if ap else None
+        groups.setdefault(sig, []).append(k)
+    for sig, keys in groups.items():
+        ap = JOBS[keys[0]].ap
+        try:
+            schedd = get_schedd(cfg, ap=ap)
+        except Exception as e:  # noqa: BLE001 — a dead AP shouldn't stall other groups
+            log(f"poll: cannot reach schedd for ap={sig}: {e}")
+            continue
+        _poll_group(cfg, schedd, keys)
+
+
+def _poll_group(cfg: dict, schedd, open_keys: list) -> None:
     # Query distinct clusters (a batched submit shares one ClusterId across many
     # procs), then match each ad back to its (cluster, proc) record.
     clusters = sorted({c for (c, _p) in open_keys})
