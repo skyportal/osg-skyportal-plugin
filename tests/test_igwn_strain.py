@@ -5,12 +5,38 @@ mocked here; the real fetch is exercised on a live OSG submit."""
 import json
 import subprocess
 
-import aframe_bridge
 import igwn_strain
-import pygrb_bridge
+
+
+def test_find_osdf_urls_in_process_when_gwdatafind_importable(monkeypatch):
+    # The pycbc image ships gwdatafind: discovery runs in-process, never touching
+    # the CVMFS igwn env (the subprocess path) that makes workers crawl.
+    import sys
+    import types
+
+    seen = {}
+    fake = types.ModuleType("gwdatafind")
+
+    def find_urls(obs, ft, s, e, **kw):
+        seen.update(obs=obs, ft=ft, s=s, e=e, kw=kw)
+        return ["osdf:///igwn/ligo/frames/O4/hoft_C00/H1/x-1-4096.gwf"]
+
+    fake.find_urls = find_urls
+    monkeypatch.setitem(sys.modules, "gwdatafind", fake)
+
+    def no_subprocess(*a, **k):
+        raise AssertionError("must not shell to the CVMFS env when gwdatafind imports")
+
+    monkeypatch.setattr(subprocess, "run", no_subprocess)
+    urls = igwn_strain.find_osdf_urls("H", "H1_HOFT_C00", 1000, 1064)
+    assert urls == ["osdf:///igwn/ligo/frames/O4/hoft_C00/H1/x-1-4096.gwf"]
+    assert seen["kw"]["urltype"] == "osdf" and seen["obs"] == "H"
 
 
 def test_find_osdf_urls_parses_subprocess_json(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "gwdatafind", None)  # force the CVMFS fallback
     seen = {}
 
     def fake_run(cmd, **kw):
@@ -27,6 +53,10 @@ def test_find_osdf_urls_parses_subprocess_json(monkeypatch):
 
 
 def test_find_osdf_urls_raises_on_failure(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "gwdatafind", None)  # force the CVMFS fallback
+
     def fake_run(cmd, **kw):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
 
@@ -73,13 +103,15 @@ def test_token_env_prefers_condor_creds(monkeypatch, tmp_path):
 
 
 def test_per_ifo_resolvers():
-    for mod in (pygrb_bridge, aframe_bridge):
-        assert mod._per_ifo({}, "frametype", "{ifo}_HOFT_C00", "L1") == "L1_HOFT_C00"
-        assert (
-            mod._per_ifo({"channel": "{ifo}:GDS-CALIB_STRAIN"}, "channel", "x", "V1")
-            == "V1:GDS-CALIB_STRAIN"
+    # Shared by both bridges; the default template, a "{ifo}" string, and a dict.
+    assert igwn_strain.per_ifo({}, "frametype", "{ifo}_HOFT_C00", "L1") == "L1_HOFT_C00"
+    assert (
+        igwn_strain.per_ifo({"channel": "{ifo}:GDS-CALIB_STRAIN"}, "channel", "x", "V1")
+        == "V1:GDS-CALIB_STRAIN"
+    )
+    assert (
+        igwn_strain.per_ifo(
+            {"frametype": {"H1": "H1_HOFT_C01"}}, "frametype", "{ifo}_HOFT_C00", "H1"
         )
-        assert (
-            mod._per_ifo({"frametype": {"H1": "H1_HOFT_C01"}}, "frametype", "{ifo}_HOFT_C00", "H1")
-            == "H1_HOFT_C01"
-        )
+        == "H1_HOFT_C01"
+    )

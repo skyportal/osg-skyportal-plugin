@@ -1,10 +1,11 @@
 """Fetch real IGWN strain on an OSPool worker: discover OSDF frame URLs with
-gwdatafind and pull them with Pelican, using the CVMFS igwn env for whichever
-tool the job image lacks (the pycbc image has no gwdatafind; the buoy image no
-pelican). Authenticated by the job's ``use_oauth_services`` scitoken.
+gwdatafind and pull them with Pelican. Prefer the job image's own tools (the
+pycbc image ships gwdatafind + pelican) so a worker never cold-loads the large
+CVMFS igwn conda env — that cold-load, not the ~64 MB/s transfer, is what makes
+naive runs crawl. The CVMFS env is only a fallback for images missing a tool.
+Authenticated by the job's ``use_oauth_services`` scitoken.
 
-Shipped alongside the stdlib-only bridges, so nothing heavy is imported at load;
-gwdatafind/gwpy run in the CVMFS env via subprocess, not in-process.
+Shipped alongside the stdlib-only bridges, so nothing heavy is imported at load.
 """
 
 from __future__ import annotations
@@ -19,6 +20,17 @@ from pathlib import Path
 # image and carries gwdatafind + gwpy + pelican.
 IGWN_ENV = "/cvmfs/software.igwn.org/conda/envs/igwn"
 DEFAULT_GWDATAFIND_HOST = "datafind.igwn.org"
+
+
+def per_ifo(params, key, default_template, ifo):
+    """A per-detector value: a dict keyed by ifo, a ``{ifo}`` template string, or
+    the default template. Shared by the pygrb + aframe bridges."""
+    val = (params or {}).get(key)
+    if isinstance(val, dict):
+        return val.get(ifo, default_template.format(ifo=ifo))
+    if isinstance(val, str) and val:
+        return val.format(ifo=ifo)
+    return default_template.format(ifo=ifo)
 
 
 def _igwn_python() -> str:
@@ -46,9 +58,32 @@ def _token_env() -> dict:
 
 
 def find_osdf_urls(observatory, frametype, start, end, host=DEFAULT_GWDATAFIND_HOST):
-    """OSDF frame URLs for ``[start, end]`` from gwdatafind (``urltype='osdf'``),
-    run in the CVMFS igwn env since the image may not ship gwdatafind. An empty
-    list means no strain is indexed for that span (e.g. no active run)."""
+    """OSDF frame URLs for ``[start, end]`` from gwdatafind (``urltype='osdf'``).
+    An empty list means no strain is indexed for that span (e.g. no active run).
+
+    Prefer the in-image gwdatafind (imported in-process — no subprocess, no CVMFS)
+    and fall back to the CVMFS igwn env only when the image lacks it."""
+    try:
+        import gwdatafind  # in-image (the pycbc image ships it)
+    except ImportError:
+        gwdatafind = None
+    if gwdatafind is not None:
+        # gwdatafind reads the scitoken via igwn-auth-utils (BEARER_TOKEN_FILE).
+        tok = _token_env().get("BEARER_TOKEN_FILE")
+        if tok:
+            os.environ["BEARER_TOKEN_FILE"] = tok
+        urls = gwdatafind.find_urls(
+            observatory,
+            frametype,
+            int(start),
+            int(end),
+            urltype="osdf",
+            host=host,
+            on_gaps="ignore",
+        )
+        return list(urls)
+
+    # Fallback: run gwdatafind in the CVMFS igwn env.
     code = (
         "import json, gwdatafind; "
         f"print(json.dumps(gwdatafind.find_urls({observatory!r}, {frametype!r}, "

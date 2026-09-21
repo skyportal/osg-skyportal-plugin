@@ -37,16 +37,6 @@ def _ifos(params):
     return tuple(val)
 
 
-def _per_ifo(params, key, default_template, ifo):
-    """A per-detector value: a dict keyed by ifo, a `{ifo}` template, or the default."""
-    val = params.get(key)
-    if isinstance(val, dict):
-        return val.get(ifo, default_template.format(ifo=ifo))
-    if isinstance(val, str) and val:
-        return val.format(ifo=ifo)
-    return default_template.format(ifo=ifo)
-
-
 def _fetch_onsource(t_event, model, ifos, pad, params):
     """Strain spanning the model's minimum window around t_event, resampled to the
     model rate. ``data_source`` selects real IGWN strain over OSDF (``gwdatafind``,
@@ -61,13 +51,13 @@ def _fetch_onsource(t_event, model, ifos, pad, params):
     fetch_end = t_event + pad
     source = str(params.get("data_source", "gwosc")).lower()
 
-    series = []
+    series, missing = [], []
     for ifo in ifos:
         if source in ("gwdatafind", "osdf", "igwn"):
             import igwn_strain  # shipped per-job
 
-            frametype = _per_ifo(params, "frametype", "{ifo}_HOFT_C00", ifo)
-            channel = _per_ifo(params, "channel", "{ifo}:GDS-CALIB_STRAIN", ifo)
+            frametype = igwn_strain.per_ifo(params, "frametype", "{ifo}_HOFT_C00", ifo)
+            channel = igwn_strain.per_ifo(params, "channel", "{ifo}:GDS-CALIB_STRAIN", ifo)
             host = params.get("gwdatafind_host") or igwn_strain.DEFAULT_GWDATAFIND_HOST
             frames = igwn_strain.fetch_frames(
                 ifo[0],
@@ -78,16 +68,22 @@ def _fetch_onsource(t_event, model, ifos, pad, params):
                 host=host,
             )
             if not frames:
-                raise ValueError(
-                    f"no {frametype} strain available for {ifo} at GPS "
-                    f"[{int(fetch_start)},{int(fetch_end)}] (no data at this epoch)"
-                )
+                missing.append(ifo)
+                continue
             ts = TimeSeries.read(
                 [str(f) for f in frames], channel, start=fetch_start, end=fetch_end
             )
         else:
             ts = TimeSeries.fetch_open_data(ifo, fetch_start, fetch_end)
         series.append(ts.resample(model.sample_rate))
+
+    # aframe's network is trained on a fixed detector set, so a short tensor is
+    # meaningless; report any offline detectors rather than crashing downstream.
+    if missing:
+        raise ValueError(
+            f"aframe needs strain from all requested detectors; none at GPS "
+            f"[{int(fetch_start)},{int(fetch_end)}] for: {', '.join(missing)}"
+        )
 
     n = min(len(ts.value) for ts in series)  # guard off-by-one across detectors
     stacked = np.stack([ts.value[:n] for ts in series])

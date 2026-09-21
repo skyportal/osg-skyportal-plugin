@@ -265,17 +265,6 @@ def _apply_gates(data, ifo: str, gates):
     return data
 
 
-def _per_ifo(params: dict, key: str, default_template: str, ifo: str) -> str:
-    """A per-detector value: a dict keyed by ifo, or a `{ifo}` template string,
-    else the default template."""
-    val = params.get(key)
-    if isinstance(val, dict):
-        return val.get(ifo, default_template.format(ifo=ifo))
-    if isinstance(val, str) and val:
-        return val.format(ifo=ifo)
-    return default_template.format(ifo=ifo)
-
-
 def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, params: dict):
     """Strain for one detector over [start, end], resampled. ``data_source`` selects:
     - ``gwdatafind``: real IGWN strain over OSDF (gwdatafind + pelican), the OSG path
@@ -291,8 +280,8 @@ def _fetch_strain(ifo: str, start: float, end: float, sample_rate: int, params: 
 
         import igwn_strain  # shipped per-job
 
-        frametype = _per_ifo(params, "frametype", "{ifo}_HOFT_C00", ifo)
-        channel = _per_ifo(params, "channel", "{ifo}:GDS-CALIB_STRAIN", ifo)
+        frametype = igwn_strain.per_ifo(params, "frametype", "{ifo}_HOFT_C00", ifo)
+        channel = igwn_strain.per_ifo(params, "channel", "{ifo}:GDS-CALIB_STRAIN", ifo)
         host = params.get("gwdatafind_host") or igwn_strain.DEFAULT_GWDATAFIND_HOST
         # Pad the discovery window so a frame boundary never clips the request.
         frames = igwn_strain.fetch_frames(
@@ -425,10 +414,15 @@ def _coherent_search(
     start = trigger_gps - seg - win - pad
     end = trigger_gps + win + pad + edge
 
-    # Condition each detector's data once; every template reuses it.
-    cond = {}
+    # Condition each detector's data once; every template reuses it. A detector
+    # with no strain (offline, e.g. Virgo down) is skipped, not fatal.
+    cond, skipped = {}, {}
     for ifo in dets:
-        data = _fetch_strain(ifo, start, end, srate, params)
+        try:
+            data = _fetch_strain(ifo, start, end, srate, params)
+        except Exception as e:
+            skipped[ifo] = str(e)[:200]
+            continue
         data = data.highpass_fir(f_low, 512)
         data = _apply_gates(data, ifo, params.get("gates"))
         psd = interpolate(data.psd(4), data.delta_f)
@@ -443,6 +437,9 @@ def _coherent_search(
             "fc": d.antenna_pattern(ra, dec, 0.0, trigger_gps)[1],
             "dt": d.time_delay_from_earth_center(ra, dec, trigger_gps),
         }
+    dets = [ifo for ifo in dets if ifo in cond]
+    if not dets:
+        raise ValueError(f"no strain for any requested detector (skipped: {skipped})")
 
     def _template_series(m1, m2):
         """Per-detector matched-filter SNR + sigma for one (m1, m2) template."""
@@ -498,6 +495,7 @@ def _coherent_search(
         "best_gps": best_gps,
         "trigger_gps": trigger_gps,
         "detectors": dets,
+        "skipped_detectors": skipped,
         "n_templates": len(bank),
         "n_triggers": int(len(trig_t)),
         "best_template": {"mass1": float(best_m1), "mass2": float(best_m2)},
