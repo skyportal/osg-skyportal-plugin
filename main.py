@@ -246,11 +246,14 @@ WRAPPER_DEFAULT_IMAGE = {
     # so its CVMFS image is fine.
     "snid": "docker://ghcr.io/fiorenst/snid-sage",
     "mosfit": "docker://ashleyvillar/mosfit",
-    # docker:// not CVMFS: buoy lives in the image's /opt/env venv, which the
-    # docker env puts on PATH but the CVMFS sandbox invocation does not.
-    "aframe": "docker://ghcr.io/ml4gw/buoy/buoy:main",
+    # CVMFS unpacked image: token-free (no OSDF auth, unlike an ospool .sif the
+    # IGWN-token'd aframe job can't read) and no per-node docker convert. Synced
+    # from docker://ghcr.io/ml4gw/buoy/buoy:main.
+    "aframe": "/cvmfs/singularity.opensciencegrid.org/ml4gw/buoy/buoy:main",
     # FLARE runtime (containers/flare.def): the package ships its own models.
-    "flare": "osdf:///ospool/ap41/data/michael.coughlin/flare-v1.sif",
+    # Versioned filename (never overwrite): OSDF caches key on the object, so
+    # reusing a name after rebuilding serves a stale copy (md5 mismatch -> held).
+    "flare": "osdf:///ospool/ap41/data/michael.coughlin/flare-v3.sif",
 }
 
 # The GW searches pull whole .gwf frame files (O4 hoft frames are ~1.5 GB each,
@@ -261,6 +264,35 @@ WRAPPER_DEFAULT_RESOURCES = {
     "pygrb": {"request_disk": 16384, "request_memory": 8192, "max_runtime_seconds": 7200},
     "aframe": {"request_disk": 16384, "request_memory": 8192, "max_runtime_seconds": 7200},
 }
+
+# wrapper -> (entrypoint, extra bridge/helper basenames). The single runtime
+# dispatch shared by the single-submit and batch paths so they can't drift (a
+# missing branch here silently ran flare in the fiesta wrapper). "" falls back
+# to the fiesta/redback runtime.
+WRAPPER_FILES = {
+    "periodfind": ("periodfind_wrapper.py", ["periodfind_bridge.py"]),
+    "mosfit": ("mosfit_wrapper.py", ["mosfit_bridge.py"]),
+    "pygrb": ("pygrb_wrapper.py", ["pygrb_bridge.py", "igwn_strain.py"]),
+    "ngsf": ("ngsf_wrapper.py", ["ngsf_bridge.py"]),
+    "snid": ("snid_wrapper.py", ["snid_bridge.py"]),
+    "alma": ("alma_wrapper.py", ["alma_bridge.py"]),
+    "aframe": ("aframe_wrapper.py", ["aframe_bridge.py", "igwn_strain.py"]),
+    "flare": ("flare_wrapper.py", ["flare_bridge.py"]),
+}
+_FIESTA_FILES = ("fiesta_wrapper.py", ["fiesta_bridge.py", "redback_bridge.py"])
+
+
+def _wrapper_spec(wrapper: str, plugin_dir: Path) -> tuple[str, list]:
+    """(wrapper_name, resolved wrapper_files) for a wrapper. GW searches also get
+    a static pelican shipped for images lacking an OSDF client (buoy)."""
+    wrapper_name, extras = WRAPPER_FILES.get(wrapper, _FIESTA_FILES)
+    names = [wrapper_name, *extras]
+    wrapper_files = [(plugin_dir / n).resolve() for n in names]
+    if wrapper in ("pygrb", "aframe"):
+        pelican_bin = (plugin_dir / "pelican").resolve()
+        if pelican_bin.exists():
+            wrapper_files.append(pelican_bin)
+    return wrapper_name, wrapper_files
 
 
 def alma_job_sizing(staged_bytes: int, params: dict, defaults: dict) -> dict:
@@ -313,70 +345,7 @@ def _stage_wrapper_job(
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "inputs.json").write_text(json.dumps(inputs))
     plugin_dir = Path(__file__).parent
-    # Which wrapper runtime to ship. "periodfind" and "mosfit" ship their own
-    # wrapper+bridge (each its own runtime, no JAX); anything else is the
-    # fiesta/redback runtime.
-    if wrapper == "periodfind":
-        wrapper_name = "periodfind_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "periodfind_wrapper.py").resolve(),
-            (plugin_dir / "periodfind_bridge.py").resolve(),
-        ]
-    elif wrapper == "mosfit":
-        wrapper_name = "mosfit_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "mosfit_wrapper.py").resolve(),
-            (plugin_dir / "mosfit_bridge.py").resolve(),
-        ]
-    elif wrapper == "pygrb":
-        wrapper_name = "pygrb_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "pygrb_wrapper.py").resolve(),
-            (plugin_dir / "pygrb_bridge.py").resolve(),
-            (plugin_dir / "igwn_strain.py").resolve(),
-        ]
-    elif wrapper == "ngsf":
-        wrapper_name = "ngsf_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "ngsf_wrapper.py").resolve(),
-            (plugin_dir / "ngsf_bridge.py").resolve(),
-        ]
-    elif wrapper == "snid":
-        wrapper_name = "snid_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "snid_wrapper.py").resolve(),
-            (plugin_dir / "snid_bridge.py").resolve(),
-        ]
-    elif wrapper == "alma":
-        # Reuses the fiesta image: the reduction needs only astropy, numpy and
-        # matplotlib, all of which fiestaem already pulls in.
-        wrapper_name = "alma_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "alma_wrapper.py").resolve(),
-            (plugin_dir / "alma_bridge.py").resolve(),
-        ]
-    elif wrapper == "aframe":
-        # ml4gw runtime image; the model files are staged below.
-        wrapper_name = "aframe_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "aframe_wrapper.py").resolve(),
-            (plugin_dir / "aframe_bridge.py").resolve(),
-            (plugin_dir / "igwn_strain.py").resolve(),
-        ]
-    elif wrapper == "flare":
-        # FLARE runtime image (containers/flare.def); classification, not a fit.
-        wrapper_name = "flare_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "flare_wrapper.py").resolve(),
-            (plugin_dir / "flare_bridge.py").resolve(),
-        ]
-    else:
-        wrapper_name = "fiesta_wrapper.py"
-        wrapper_files = [
-            (plugin_dir / "fiesta_wrapper.py").resolve(),
-            (plugin_dir / "fiesta_bridge.py").resolve(),
-            (plugin_dir / "redback_bridge.py").resolve(),
-        ]
+    wrapper_name, wrapper_files = _wrapper_spec(wrapper, plugin_dir)
 
     output_url = None
     osdf_cfg = cfg.get("osdf") or {}
@@ -665,29 +634,8 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     # which includes the image + wrapper, so one cluster is a single runtime).
     p0 = (items[0].get("inputs") or {}).get("analysis_parameters", {}) or {}
     wrapper = str(p0.get("wrapper", "")).strip().lower()
-    if wrapper == "periodfind":
-        wrapper_name = "periodfind_wrapper.py"
-        wrapper_files = [plugin_dir / "periodfind_wrapper.py", plugin_dir / "periodfind_bridge.py"]
-    elif wrapper == "mosfit":
-        wrapper_name = "mosfit_wrapper.py"
-        wrapper_files = [plugin_dir / "mosfit_wrapper.py", plugin_dir / "mosfit_bridge.py"]
-    elif wrapper == "pygrb":
-        wrapper_name = "pygrb_wrapper.py"
-        wrapper_files = [plugin_dir / "pygrb_wrapper.py", plugin_dir / "pygrb_bridge.py"]
-    elif wrapper == "ngsf":
-        wrapper_name = "ngsf_wrapper.py"
-        wrapper_files = [plugin_dir / "ngsf_wrapper.py", plugin_dir / "ngsf_bridge.py"]
-    elif wrapper == "snid":
-        wrapper_name = "snid_wrapper.py"
-        wrapper_files = [plugin_dir / "snid_wrapper.py", plugin_dir / "snid_bridge.py"]
-    else:
-        wrapper_name = "fiesta_wrapper.py"
-        wrapper_files = [
-            plugin_dir / "fiesta_wrapper.py",
-            plugin_dir / "fiesta_bridge.py",
-            plugin_dir / "redback_bridge.py",
-        ]
-    transfer_files = ",".join(str(f.resolve()) for f in wrapper_files)
+    wrapper_name, wrapper_files = _wrapper_spec(wrapper, plugin_dir)
+    transfer_files = ",".join(str(f) for f in wrapper_files)
     submit_desc: dict[str, str] = {
         # env resolves python3 via PATH, so any image layout works.
         "executable": "/usr/bin/env",
@@ -716,6 +664,12 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     if cpu_req:
         submit_desc["requirements"] += f" && {cpu_req}"
     _apply_gpu_and_image(submit_desc, p0, defaults)
+    # Per-wrapper default image, matching the single-submit path; the batch group
+    # shares one wrapper (see _submit_signature), so this is a cluster-wide image.
+    # Without it a batchable wrapper (flare/ngsf/snid/mosfit) silently falls back
+    # to the global default image instead of its own.
+    if not p0.get("singularity_image") and wrapper in WRAPPER_DEFAULT_IMAGE:
+        submit_desc["+SingularityImage"] = f'"{WRAPPER_DEFAULT_IMAGE[wrapper]}"'
     _apply_igwn_ap(submit_desc, p0, defaults)
     env_parts = []
     env_parts.append(f"OSG_NUM_CPUS={p0.get('request_cpus', defaults['request_cpus'])}")

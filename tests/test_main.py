@@ -455,6 +455,48 @@ def test_wrapper_supplies_default_image_when_request_omits_it(
     assert last_submit_desc["+SingularityImage"] == f'"{main.WRAPPER_DEFAULT_IMAGE["snid"]}"'
 
 
+def test_batch_supplies_wrapper_default_image(plugin_cfg, last_submit_desc, tmp_path, monkeypatch):
+    # The batch path must apply the per-wrapper image too; else a batchable
+    # wrapper (snid/flare/...) silently falls to the global default image.
+    monkeypatch.chdir(tmp_path)
+    plugin_cfg["staging_dir"] = str(tmp_path / "stg")
+    main.submit_jobs_batch(
+        plugin_cfg,
+        [
+            {
+                "analysis_name": "snid_osg",
+                "resource_id": "ZTF1",
+                "callback_url": None,
+                "callback_method": "POST",
+                "inputs": {"analysis_parameters": {"wrapper": "snid"}},
+            }
+        ],
+    )
+    assert last_submit_desc["+SingularityImage"] == f'"{main.WRAPPER_DEFAULT_IMAGE["snid"]}"'
+
+
+def test_batch_ships_correct_wrapper_for_flare(plugin_cfg, last_submit_desc, tmp_path, monkeypatch):
+    # A batchable wrapper must run its own entrypoint; flare fell through to the
+    # fiesta wrapper (No module named 'fiesta') when the batch dispatch lacked it.
+    monkeypatch.chdir(tmp_path)
+    plugin_cfg["staging_dir"] = str(tmp_path / "stg")
+    main.submit_jobs_batch(
+        plugin_cfg,
+        [
+            {
+                "analysis_name": "flare_osg",
+                "resource_id": "ZTF1",
+                "callback_url": None,
+                "callback_method": "POST",
+                "inputs": {"analysis_parameters": {"wrapper": "flare"}},
+            }
+        ],
+    )
+    assert "flare_wrapper.py" in last_submit_desc["arguments"]
+    assert "flare_bridge.py" in last_submit_desc["transfer_input_files"]
+    assert "fiesta_wrapper.py" not in last_submit_desc["transfer_input_files"]
+
+
 def test_aframe_wrapper_stages_files_image_and_model(
     plugin_cfg, last_submit_desc, tmp_path, monkeypatch
 ):
