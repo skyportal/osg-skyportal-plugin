@@ -73,3 +73,46 @@ def test_params_passthrough():
         flare_bridge._params(_payload(analysis_parameters={"horizon_days": 20}))["horizon_days"]
         == 20
     )
+
+
+def _result(predicted="SN_Ia"):
+    return {
+        "annotations": {"flare_class": predicted, "flare_p_max": 0.9},
+        "results": {
+            "classification": {
+                "predicted": predicted,
+                "probabilities": {predicted: 0.9, "AGN": 0.1},
+            }
+        },
+    }
+
+
+def test_shape_annotations_to_list_with_full_probs():
+    r = _result()
+    flare_bridge._shape_for_skyportal(r)
+    assert isinstance(r["annotations"], list) and r["annotations"][0]["origin"] == "FLARE"
+    data = r["annotations"][0]["data"]
+    assert data["flare_p_SN_Ia"] == 0.9 and data["flare_p_AGN"] == 0.1  # full vector added
+    assert data["flare_class"] == "SN_Ia"  # original keys kept
+
+
+def test_shape_emits_ml_classification_mapped_to_sitewide():
+    r = _result()
+    flare_bridge._shape_for_skyportal(r)
+    c = r["classifications"][0]
+    assert c == {
+        "taxonomy": "Sitewide Taxonomy",
+        "classification": "Ia",
+        "probability": 0.9,
+        "ml": True,
+        "origin": "FLARE",
+    }
+
+
+def test_shape_maps_cc_and_slsn():
+    r = _result("SN_CC")
+    flare_bridge._shape_for_skyportal(r)
+    assert r["classifications"][0]["classification"] == "Type II"
+    r = _result("SLSN")
+    flare_bridge._shape_for_skyportal(r)
+    assert r["classifications"][0]["classification"] == "Ic-SLSN"

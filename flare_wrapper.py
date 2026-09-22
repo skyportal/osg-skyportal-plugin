@@ -60,6 +60,8 @@ def bundle_for_skyportal(result: dict) -> dict:
         analysis["plots"] = plots
     if result.get("annotations"):
         analysis["annotations"] = result["annotations"]
+    if result.get("classifications"):
+        analysis["classifications"] = result["classifications"]
     return {
         "status": "success",
         "message": result.get("message", "FLARE complete"),
