@@ -12,6 +12,7 @@ plot. Runs inside the fiesta runtime image on an OSG worker.
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -312,6 +313,13 @@ def run_from_skyportal_inputs(
     from fiesta.inference.likelihood import EMLikelihood
     from fiesta.utils import load_event_data
 
+    # Records whether CUDA actually engaged (vs a silent CPU fallback). Never fatal.
+    try:
+        backend = jax.default_backend()
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        backend = "cpu"
+        print(f"fiesta_bridge: cuda init failed: {e}", file=sys.stderr)
+
     params = _params(payload)
     source = str(params["source"])
     if outdir is None:
@@ -426,7 +434,7 @@ def run_from_skyportal_inputs(
         n_detections = None
     result: dict[str, Any] = {
         "status": "success",
-        "message": f"fiesta fit complete (model={source}, sampler={sampler})",
+        "message": f"fiesta fit complete (model={source}, sampler={sampler}, jax={backend})",
         "source": source,  # the fitted model name (for SkyPortal's per-model overlay label)
         "sampler": sampler,
         "n_detections": n_detections,  # detections the fit used (for run versioning)
