@@ -22,11 +22,15 @@ First increment: Arnett wired end-to-end; other models add a MODELS entry.
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-DEFAULTS = {"source": "arnett", "n_particles": 500}
+# n_particles/num_mcmc_steps sized for triage-grade OSPool runs: the float64
+# diffrax ODE models are ~1hr/model at the upstream 500/20, tripping the 2h
+# Fiesta_OSG timeout. Both are per-request overridable for a fuller posterior.
+DEFAULTS = {"source": "arnett", "n_particles": 250, "num_mcmc_steps": 10}
 _CURVE_NPTS = 100
 # redback/jax_supernovae bandpass registry (register_all_bandpasses). SkyPortal
 # filters are mapped onto these; observations in unmappable bands are dropped
@@ -313,6 +317,12 @@ def run_from_skyportal_inputs(
     from redback_jax.transient import Transient
     from redback_jax.utils import luminosity_distance_cm
 
+    # Records whether CUDA actually engaged (vs a silent CPU fallback) in the AP .err.
+    print(
+        f"redback_bridge: jax backend={jax.default_backend()} devices={jax.devices()}",
+        file=sys.stderr,
+    )
+
     params = _params(payload)
     source = str(params["source"])
     if source not in _model_registry():
@@ -382,7 +392,8 @@ def run_from_skyportal_inputs(
     result = run_nested_sampling(
         loglike,
         bounds,
-        n_particles=int(params.get("n_particles", 500)),
+        n_particles=int(params.get("n_particles", 250)),
+        num_mcmc_steps=int(params.get("num_mcmc_steps", 10)),
         rng_key=jax.random.PRNGKey(int(seed)),
         verbose=False,
     )
