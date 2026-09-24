@@ -317,11 +317,14 @@ def run_from_skyportal_inputs(
     from redback_jax.transient import Transient
     from redback_jax.utils import luminosity_distance_cm
 
-    # Records whether CUDA actually engaged (vs a silent CPU fallback) in the AP .err.
-    print(
-        f"redback_bridge: jax backend={jax.default_backend()} devices={jax.devices()}",
-        file=sys.stderr,
-    )
+    # Records whether CUDA actually engaged (vs a silent CPU fallback) in the AP
+    # .err. Never fatal: a failed CUDA init must fall back to CPU, not crash the fit.
+    try:
+        backend = jax.default_backend()
+        devices = jax.devices()
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        backend, devices = "cpu", f"cuda init failed: {e}"
+    print(f"redback_bridge: jax backend={backend} devices={devices}", file=sys.stderr)
 
     params = _params(payload)
     source = str(params["source"])
@@ -404,7 +407,7 @@ def run_from_skyportal_inputs(
 
     out: dict[str, Any] = {
         "status": "success",
-        "message": f"redback fit complete (model={source}, sampler=nested-smc)"
+        "message": f"redback fit complete (model={source}, sampler=nested-smc, jax={backend})"
         + (f", T0 fixed to MJD {trigger_time}" if trigger_time is not None else ""),
         "source": source,
         "n_detections": n_det,
