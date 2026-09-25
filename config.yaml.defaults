@@ -51,10 +51,10 @@ services:
                     # "" = any GPU. Appended to requirements when request_gpus>0.
                     gpu_requirements: ""
                     # Per-GPU property constraint (HTCondor require_gpus), applied
-                    # when request_gpus>0. The CUDA-12 jax wheels need a driver
-                    # supporting CUDA 12; older-driver nodes assign a GPU but fail
+                    # when request_gpus>0. The CUDA-13 jax wheels need a driver
+                    # supporting CUDA 13; older-driver nodes assign a GPU but fail
                     # CUDA init. "" disables. Clear this if GPU jobs stop matching.
-                    require_gpus: "DriverVersion >= 12.0"
+                    require_gpus: "DriverVersion >= 13.0"
                     # IGWN access-point knobs (all "" = plain OSPool submission).
                     # Set these to submit to an IGWN-credentialed AP (e.g. AP42)
                     # instead of ap41, so the AP mints + delivers an IGWN-scoped

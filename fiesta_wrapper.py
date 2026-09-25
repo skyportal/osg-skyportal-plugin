@@ -31,6 +31,12 @@ except ImportError:
 # it lazily). Ephemeral OSPool jobs => no cross-job reuse; that's loop-in-job's.
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(Path.cwd() / ".jax_cache"))
 
+# Prefer the GPU, fall back to CPU instead of crashing. The cuda wheels raise
+# "no supported devices found for platform CUDA" on a node whose driver is too
+# old for them; without this a GPU job on such a node aborts rather than running
+# on CPU. Set before jax loads.
+os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
+
 
 def _limit_cpu_affinity() -> None:
     """Pin the process to request_cpus cores before JAX loads. JAX/XLA on CPU
