@@ -254,6 +254,8 @@ WRAPPER_DEFAULT_IMAGE = {
     # Versioned filename (never overwrite): OSDF caches key on the object, so
     # reusing a name after rebuilding serves a stale copy (md5 mismatch -> held).
     "flare": "osdf:///ospool/ap41/data/michael.coughlin/flare-v3.sif",
+    # ORACLE runtime: the maintainer's image ships the oracle package + weights.
+    "oracle": "/cvmfs/singularity.opensciencegrid.org/dev-ved30/oracle:main",
 }
 
 # The GW searches pull whole .gwf frame files (O4 hoft frames are ~1.5 GB each,
@@ -278,6 +280,7 @@ WRAPPER_FILES = {
     "alma": ("alma_wrapper.py", ["alma_bridge.py"]),
     "aframe": ("aframe_wrapper.py", ["aframe_bridge.py", "igwn_strain.py"]),
     "flare": ("flare_wrapper.py", ["flare_bridge.py"]),
+    "oracle": ("oracle_wrapper.py", ["oracle_bridge.py"]),
 }
 _FIESTA_FILES = ("fiesta_wrapper.py", ["fiesta_bridge.py", "redback_bridge.py"])
 
@@ -334,6 +337,7 @@ def _stage_wrapper_job(
         "alma",
         "aframe",
         "flare",
+        "oracle",
     ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
         return {}, None
@@ -1180,6 +1184,8 @@ class AnalysisHandler(tornado.web.RequestHandler):
                     params.setdefault("wrapper", "snid")
                 elif "flare" in name:
                     params.setdefault("wrapper", "flare")
+                elif "oracle" in name:
+                    params.setdefault("wrapper", "oracle")
                 elif "redback" in name:
                     params.setdefault("backend", "redback")
 
