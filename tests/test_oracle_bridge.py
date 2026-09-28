@@ -61,6 +61,27 @@ def test_no_detections_fails_gracefully():
     assert out["status"] == "failure"
 
 
+def test_merged_annotations_flattens_alert_fields():
+    # SkyPortal exports annotations as a CSV whose `data` cell is a dict string.
+    ann = _csv(
+        [
+            {"data": "{'sgscore1': 0.036, 'distpsnr1': 7.09, 'drb': 0.99}", "origin": "BOOM"},
+            {"data": "{'ndethist': 7, 'zogy_scorr': 8.7}", "origin": "grb"},
+        ],
+        ["data", "modified", "origin", "created_at"],
+    )
+    merged = oracle_bridge.merged_annotations({"annotations": ann})
+    assert merged["sgscore1"] == 0.036 and merged["distpsnr1"] == 7.09 and merged["ndethist"] == 7
+
+
+def test_feat_uses_alias_and_flag_fallback():
+    merged = {"zogy_scorr": 8.7}
+    # scorr aliases to zogy_scorr; a missing feature and ZTF's -999 both -> flag.
+    assert oracle_bridge._feat(merged, "scorr", -9) == 8.7
+    assert oracle_bridge._feat({}, "sgscore1", -9) == -9
+    assert oracle_bridge._feat({"drb": -999}, "drb", -9) == -9
+
+
 def test_taxonomy_map_covers_bts_leaves():
     # The seven BTS_Taxonomy leaves each map to a Sitewide Taxonomy (id 1019) label.
     expected = {"SN-Ia", "SN-II", "SN-Ib/c", "SLSN", "AGN", "CV", "Varstar"}
