@@ -415,6 +415,13 @@ def _stage_wrapper_job(
             )
         ]
 
+    # oracle runs the full omni model, which needs the reference cutout on the
+    # worker; fetch it from BOOM here (the worker can't reach it). Non-fatal.
+    if wrapper == "oracle":
+        import oracle_staging
+
+        transfer += [str(p) for p in oracle_staging.stage_cutout(cfg, inputs, job_dir, log=log)]
+
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
     # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).
     # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under

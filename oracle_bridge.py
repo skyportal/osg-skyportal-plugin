@@ -1,18 +1,26 @@
 """
 Oracle bridge — turns a SkyPortal photometry payload into an ORACLE-2 classification.
 
-Runs ORACLE-2 (``BTSv2``, the GRU+metadata model) from the ``dev-ved30/oracle``
-image. Light-curve-only (``BTSv2-lite``) is far weaker: without the host/context
-features it mislabels ordinary supernovae as AGN, so we feed the static/metadata
-the model was trained on -- pulled from the source's SkyPortal annotations (the
-ZTF/BOOM alert fields: sgscore1, distpsnr1, ndethist, drb, PS1 mags, ...) plus the
-galactic coordinates from the obj ra/dec. Missing features fall back to the
-model's flag value, matching the real-time BOOM path (oracle_support).
+Runs ORACLE-2 in its full "omni" mode (``BTSv2-pro``, the GRU + metadata + image
+model) from the ``dev-ved30/oracle`` image. The lighter models are far weaker:
+without the host/context features an ordinary supernova gets mislabelled as AGN,
+and with only partial metadata the model is confidently wrong, so we feed all
+three inputs it was trained on:
 
-The batch construction mirrors that BOOM path: 5 ts features per detection
-(days since first detection, magpsf, sigmapsf, filter mean-wavelength, photflag=1)
-and a 30-d static vector (time-independent then metadata). ``torch`` and ``oracle``
-are imported lazily so this module imports in a bare test env.
+- the light curve (ZTF g/r/i detections);
+- a 30-d static vector — the ZTF/BOOM alert fields (sgscore1, distpsnr1, ndethist,
+  drb, PS1 mags, ...) pulled from the source's SkyPortal annotations, plus the
+  galactic coordinates from the obj ra/dec, flag value where a field is absent;
+- the reference (template) cutout, fetched from BOOM by the listener and staged in
+  the sandbox (see oracle_staging), placed in the channel of the last detection's
+  band. Missing cutout -> a zero postage stamp, matching the BOOM path when the
+  template is absent.
+
+The batch mirrors the real-time BOOM path (oracle_support): 5 ts features per
+detection (days since first detection, magpsf, sigmapsf, filter mean-wavelength,
+photflag=1), the 30-d static vector, and a (1, 3, 63, 63) L2-normalised postage
+stamp. ``torch`` and ``oracle`` are imported lazily so this module imports in a
+bare test env.
 """
 
 from __future__ import annotations
@@ -42,6 +50,13 @@ FILTER_TO_BAND = {
 # A few Oracle metadata feature names differ from the annotation field names.
 META_ALIASES = {"scorr": ("scorr", "zogy_scorr")}
 
+# ZTF band -> postage-stamp channel; the reference cutout goes in the last
+# detection's band, matching the BOOM path (oracle_support).
+BAND_TO_CHANNEL = {"g": 0, "r": 1, "i": 2}
+
+# Reference cutout staged into the sandbox by the listener (gzipped FITS bytes).
+CUTOUT_FILE = "oracle_cutout.fits.gz"
+
 ORACLE_TAXONOMY = "Sitewide Taxonomy"
 # ORACLE-2 BTS leaf classes -> nearest Sitewide Taxonomy label (id 1019).
 ORACLE_TO_TAXONOMY = {
@@ -57,7 +72,7 @@ ORACLE_TO_TAXONOMY = {
 # FLARE and human labels.
 ORACLE_ORIGIN = "ORACLE"
 
-DEFAULT_MODEL = "BTSv2"
+DEFAULT_MODEL = "BTSv2-pro"
 
 _MODEL = None
 _MODEL_KEY = None
@@ -147,12 +162,47 @@ def _galactic(payload: dict) -> tuple:
         return None
 
 
+def _load_cutout(path):
+    """A staged reference cutout (gzipped FITS) -> a 63x63 L2-normalised array,
+    or None if it is missing or unreadable. Mirrors oracle_support.load_cutout
+    (no flip; the BOOM path feeds the unflipped array the model trained on)."""
+    import gzip
+    import io
+
+    if not os.path.exists(path):
+        return None
+    try:
+        import numpy as np
+        from astropy.io import fits
+
+        raw = gzip.decompress(Path(path).read_bytes())
+        with fits.open(io.BytesIO(raw)) as hdul:
+            image = hdul[0].data.astype(float)
+        image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
+        norm = np.linalg.norm(image)
+        if norm != 0:
+            image = image / norm
+        return image
+    except Exception:  # noqa: BLE001 — cutout is optional; degrade to a zero stamp
+        return None
+
+
+# The proven BTSv2-pro run (matches the real-time BOOM weights); preferred over
+# any other run baked into the image.
+PREFERRED_RUN = {"BTSv2-pro": "morning-feather-572"}
+
+
 def _default_weights(model_choice: str) -> str:
     import glob
 
     hits = sorted(glob.glob(f"/opt/oracle/models/{model_choice}/*/best_model_f1.pth"))
     if not hits:
         raise FileNotFoundError(f"no {model_choice} weights under /opt/oracle/models")
+    run = PREFERRED_RUN.get(model_choice)
+    if run:
+        preferred = [h for h in hits if f"/{run}/" in h]
+        if preferred:
+            return preferred[0]
     return hits[-1]
 
 
@@ -161,20 +211,32 @@ def _load_model(model_choice: str, weights: str):
     key = (model_choice, weights)
     if _MODEL is None or _MODEL_KEY != key:
         import torch
-        from oracle.presets import get_model
 
-        m = get_model(model_choice)
+        if model_choice == "BTSv2-pro":
+            # get_model("BTSv2-pro") builds the spines from relative default dirs
+            # that don't exist in the sandbox; build with None spines and load the
+            # combined weights, as the BOOM path does.
+            from oracle.architectures import GRU_MD_MM_Improved
+            from oracle.taxonomies import BTS_Taxonomy
+
+            m = GRU_MD_MM_Improved(BTS_Taxonomy(), lc_md_model_dir=None, image_model_dir=None)
+        else:
+            from oracle.presets import get_model
+
+            m = get_model(model_choice)
         m.load_state_dict(torch.load(weights, map_location="cpu"), strict=True)
         m.eval()
         _MODEL, _MODEL_KEY = m, key
     return _MODEL
 
 
-def _build_batch(rows, payload, torch):
+def _build_batch(rows, payload, torch, work_dir="."):
     """(mjd, band, mag, magerr) rows + the source annotations -> the model batch.
     ts: 5 features per point [days_since_first, magpsf, sigmapsf, mean_wavelength]
     with photflag left at 1. static: the 30-d [time-independent + metadata] vector
-    the GRU+MD model expects, from annotations (flag value where absent)."""
+    the GRU+MD model expects, from annotations (flag value where absent).
+    postage_stamp: (1, 3, 63, 63), the reference cutout in the last detection's
+    band channel, zeros where it's missing."""
     from oracle.custom_datasets.BTS import (
         ZTF_passband_to_wavelengths,
         flag_value,
@@ -203,10 +265,17 @@ def _build_batch(rows, payload, torch):
             static_vals.append(_feat(merged, col, flag_value))
     static_vals += [_feat(merged, col, flag_value) for col in meta_data_feature_list]
 
+    postage_stamp = torch.zeros((1, 3, 63, 63))
+    image = _load_cutout(os.path.join(work_dir, CUTOUT_FILE))
+    ch = BAND_TO_CHANNEL.get(rows[-1][1])  # last (most recent) detection's band
+    if image is not None and getattr(image, "shape", None) == (63, 63) and ch is not None:
+        postage_stamp[0, ch] = torch.from_numpy(image).float()
+
     return {
         "ts": ts,
         "static": torch.tensor([static_vals], dtype=torch.float32),
         "length": torch.tensor([n]),
+        "postage_stamp": postage_stamp,
     }
 
 
@@ -223,7 +292,7 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     model = _load_model(model_choice, weights)
 
     with torch.no_grad():
-        df = model.predict_class_probabilities_df(_build_batch(rows, payload, torch))
+        df = model.predict_class_probabilities_df(_build_batch(rows, payload, torch, work_dir))
 
     leaves = model.taxonomy.get_leaf_nodes()
     probs = {c: round(float(df[c].iloc[0]), 4) for c in leaves if c in df.columns}
@@ -232,9 +301,11 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     predicted = max(probs, key=probs.get)
     prob = probs[predicted]
 
+    cutout = "with cutout" if os.path.exists(os.path.join(work_dir, CUTOUT_FILE)) else "no cutout"
+    msg = f"ORACLE-2 ({model_choice}): {predicted} (p={prob:.3f}), {len(rows)} detections, {cutout}"
     result = {
         "status": "success",
-        "message": f"ORACLE-2 ({model_choice}): {predicted} (p={prob:.3f}), {len(rows)} detections",
+        "message": msg,
         "results": {"model": model_choice, "predicted": predicted, "probabilities": probs},
         "annotations": [
             {"origin": ORACLE_ORIGIN, "data": {f"oracle_p_{k}": v for k, v in probs.items()}}

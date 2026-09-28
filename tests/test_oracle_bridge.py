@@ -88,3 +88,15 @@ def test_taxonomy_map_covers_bts_leaves():
     assert set(oracle_bridge.ORACLE_TO_TAXONOMY) == expected
     assert oracle_bridge.ORACLE_ORIGIN == "ORACLE"
     assert oracle_bridge.ORACLE_TAXONOMY == "Sitewide Taxonomy"
+
+
+def test_default_is_omni_pro_with_reference_channels():
+    # Default runs the full omni model; the cutout lands in the last band's channel.
+    assert oracle_bridge.DEFAULT_MODEL == "BTSv2-pro"
+    assert oracle_bridge.BAND_TO_CHANNEL == {"g": 0, "r": 1, "i": 2}
+    assert oracle_bridge.CUTOUT_FILE == "oracle_cutout.fits.gz"
+
+
+def test_load_cutout_missing_file_is_none():
+    # Absent cutout degrades to None (a zero postage stamp), never raises.
+    assert oracle_bridge._load_cutout("/nonexistent/oracle_cutout.fits.gz") is None
