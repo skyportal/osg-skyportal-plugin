@@ -63,17 +63,20 @@ def _latest_candid(alerts) -> str | None:
     return best.get("candid") or best.get("_id")
 
 
-def _ensure_db(cfg: dict) -> bool:
+def _ensure_db() -> None:
     """Initialise the DB connection once (this service's own, like any SkyPortal
-    microservice). False if SkyPortal isn't importable — i.e. running standalone."""
+    microservice). Reads the full app config directly: the listener is handed only
+    its own params block, which has no ``database`` key. Raises if SkyPortal isn't
+    importable — i.e. running standalone — and the caller degrades to no cutout."""
     global _DB_INITED
     if _DB_INITED:
-        return True
+        return
+    from baselayer.app.env import load_env
     from baselayer.app.models import init_db
 
-    init_db(**cfg["database"])
+    _, app_cfg = load_env()
+    init_db(**app_cfg["database"])
     _DB_INITED = True
-    return True
 
 
 def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path]:
@@ -87,7 +90,7 @@ def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path
     try:
         import sqlalchemy as sa
 
-        _ensure_db(cfg)
+        _ensure_db()
         from baselayer.app.models import DBSession
         from skyportal.broker_apis.interface import survey_permissions
         from skyportal.models import (  # noqa: F401 — Stream for the join
