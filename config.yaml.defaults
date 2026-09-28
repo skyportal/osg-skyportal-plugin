@@ -137,12 +137,6 @@ services:
                     weights: null       # local path or OSDF URL for the aframe weights (.pt)
                     config: null        # local path or OSDF URL for the aframe config yaml
                     background: null    # local path or OSDF URL for the FAR background hdf5 (optional)
-                oracle:
-                    # SkyPortal broker whose cutouts route (/api/brokers/<id>/alerts/
-                    # <candid>/cutouts) serves the reference image for the omni model,
-                    # fetched with skyportal.api_token at submit time. Null => no cutout
-                    # (the job still runs on light curve + metadata).
-                    broker_id: null
                 # Per-job scratch dir (inputs.json, etc.). Created on demand.
                 staging_dir: staging
                 auth:

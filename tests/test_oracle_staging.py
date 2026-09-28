@@ -1,5 +1,6 @@
-"""Pure-logic tests for oracle_staging (no network): latest-candid selection, the
-BOOM cutout field decode, and the config/inputs guards that skip the fetch."""
+"""Pure-logic tests for oracle_staging (no DB): latest-candid selection, the BOOM
+cutout field decode, and the best-effort guards that skip the fetch. The in-process
+DB fetch itself needs a live SkyPortal and is exercised there, not here."""
 
 import base64
 import gzip
@@ -9,10 +10,11 @@ import oracle_staging
 
 def test_latest_candid_picks_highest_jd():
     alerts = [
-        {"candid": "a", "candidate": {"jd": 2460000.5}},
-        {"candid": "b", "candidate": {"jd": 2460010.5}},
-        {"candid": "c", "candidate": {"jd": 2460005.5}},
+        {"_id": "a", "candidate": {"jd": 2460000.5}},
+        {"_id": "b", "candidate": {"jd": 2460010.5}},
+        {"_id": "c", "candidate": {"jd": 2460005.5}},
     ]
+    # candid is nested; the top-level _id equals it, so _latest_candid falls back to it.
     assert oracle_staging._latest_candid(alerts) == "b"
 
 
@@ -32,20 +34,12 @@ def test_gzip_fits_bytes_from_base64_and_stampdata():
     assert oracle_staging._gzip_fits_bytes({}) is None
 
 
-def test_stage_cutout_skips_without_broker_or_token(tmp_path):
-    # No broker id / real token configured -> no fetch, no file, no raise.
-    cfg = {"skyportal": {"base_url": "http://x", "api_token": "replace_with_token"}}
-    assert (
-        oracle_staging.stage_cutout(cfg, {"obj": {"id": "ZTF1"}}, tmp_path, log=lambda *_: None)
-        == []
-    )
-    cfg = {"skyportal": {"base_url": "http://x", "api_token": "tok"}, "oracle": {"broker_id": None}}
-    assert (
-        oracle_staging.stage_cutout(cfg, {"obj": {"id": "ZTF1"}}, tmp_path, log=lambda *_: None)
-        == []
-    )
-
-
 def test_stage_cutout_skips_without_obj_id(tmp_path):
-    cfg = {"skyportal": {"base_url": "http://x", "api_token": "tok"}, "oracle": {"broker_id": 3}}
-    assert oracle_staging.stage_cutout(cfg, {}, tmp_path, log=lambda *_: None) == []
+    assert oracle_staging.stage_cutout({}, {}, tmp_path, log=lambda *_: None) == []
+
+
+def test_stage_cutout_non_fatal_without_skyportal(tmp_path):
+    # Standalone (no SkyPortal/DB importable) degrades to no cutout, never raises.
+    out = oracle_staging.stage_cutout({}, {"obj": {"id": "ZTF1"}}, tmp_path, log=lambda *_: None)
+    assert out == []
+    assert not (tmp_path / oracle_staging.CUTOUT_FILE).exists()
