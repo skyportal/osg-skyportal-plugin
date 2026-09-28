@@ -6,9 +6,10 @@ listener at submit time, like aframe_staging.
 The listener is an in-pod SkyPortal service, so it goes straight through the ORM:
 open a DB session, find the active BOOM broker, resolve the object's latest candid
 and pull its cutouts via the broker class. The broker carries its own BOOM
-credentials (Broker.altdata), so no token of ours is involved; ``permissions=None``
-marks this a trusted in-app call. The reference (template) cutout is written as the
-gzipped FITS bytes oracle_bridge expects.
+credentials (Broker.altdata), so no token of ours is involved. The alert query is
+scoped to the same streams the source's groups grant (``survey_permissions``), so
+the classifier only ever pulls a cutout it would be allowed to see. The reference
+(template) cutout is written as the gzipped FITS bytes oracle_bridge expects.
 
 Everything here is best-effort: run standalone (no SkyPortal/DB) or with no alert,
 broker or cutout and it returns [] — the job then runs without the image, same as
@@ -88,7 +89,13 @@ def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path
 
         _ensure_db(cfg)
         from baselayer.app.models import DBSession
-        from skyportal.models import Broker
+        from skyportal.broker_apis.interface import survey_permissions
+        from skyportal.models import (  # noqa: F401 — Stream for the join
+            Broker,
+            Group,
+            Source,
+            Stream,
+        )
 
         with DBSession() as session:
             broker = session.scalars(
@@ -100,15 +107,30 @@ def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path
                 log("oracle staging: no active BOOM broker; no cutout")
                 return []
 
+            # Scope to the streams the source's own groups grant: the classifier
+            # only sees alerts those groups would.
+            groups = (
+                session.scalars(
+                    sa.select(Group)
+                    .join(Source, Source.group_id == Group.id)
+                    .where(Source.obj_id == obj_id)
+                )
+                .unique()
+                .all()
+            )
+            permissions = survey_permissions([s for g in groups for s in g.streams])
+
             alerts = broker.broker_class.query_alerts(
-                broker, session, objectId=obj_id, permissions=None
+                broker, session, objectId=obj_id, permissions=permissions
             )
             candid = _latest_candid(alerts)
             if candid is None:
-                log(f"oracle staging: no BOOM alert for {obj_id}; no cutout")
+                log(f"oracle staging: no accessible BOOM alert for {obj_id}; no cutout")
                 return []
 
-            cutouts = broker.broker_class.get_cutouts(broker, candid, session, permissions=None)
+            cutouts = broker.broker_class.get_cutouts(
+                broker, candid, session, permissions=permissions
+            )
             field = next((cutouts[k] for k in TEMPLATE_KEYS if cutouts.get(k) is not None), None)
             raw = _gzip_fits_bytes(field)
             if not raw:
