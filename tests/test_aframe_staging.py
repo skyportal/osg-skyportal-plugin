@@ -64,3 +64,58 @@ def test_background_optional_weights_warns(tmp_path):
     assert any("weights" in w for w in warnings)
     assert any("config" in w for w in warnings)
     assert not any("background" in w for w in warnings)
+
+
+def test_transfer_urls_passthrough_returns_urls(tmp_path, monkeypatch):
+    # With transfer_urls set, URL sources are handed to transfer_input_files as-is
+    # (the worker pulls them); osdf.download must not be called.
+    def boom(*a, **k):
+        raise AssertionError("download should not run in passthrough mode")
+
+    monkeypatch.setattr(osdf, "download", boom)
+    job = tmp_path / "job"
+    job.mkdir()
+
+    staged = aframe_staging.stage_models(
+        {
+            "transfer_urls": True,
+            "weights": "igwn+osdf:///igwn/cit/staging/michael.coughlin/aframe/v1/aframe.pt",
+            "config": "osdf:///igwn/cit/staging/michael.coughlin/aframe/v1/aframe_config_bbh.yaml",
+        },
+        job,
+    )
+
+    assert staged == [
+        "igwn+osdf:///igwn/cit/staging/michael.coughlin/aframe/v1/aframe.pt",
+        "osdf:///igwn/cit/staging/michael.coughlin/aframe/v1/aframe_config_bbh.yaml",
+    ]
+    # nothing written to the pod's job dir
+    assert list(job.iterdir()) == []
+
+
+def test_transfer_urls_warns_on_basename_mismatch(tmp_path):
+    warnings = []
+    job = tmp_path / "job"
+    job.mkdir()
+
+    staged = aframe_staging.stage_models(
+        {"transfer_urls": True, "weights": "igwn+osdf:///igwn/cit/staging/u/aframe/aframe.v1.pt"},
+        job,
+        log=warnings.append,
+    )
+
+    assert staged == ["igwn+osdf:///igwn/cit/staging/u/aframe/aframe.v1.pt"]
+    assert any("aframe.pt" in w and "basename" in w for w in warnings)
+
+
+def test_transfer_urls_still_copies_local_files(tmp_path):
+    # A local path is copied even when transfer_urls is set (only URLs pass through).
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"w")
+    job = tmp_path / "job"
+    job.mkdir()
+
+    staged = aframe_staging.stage_models({"transfer_urls": True, "weights": str(weights)}, job)
+
+    assert [Path(p).name for p in staged] == ["aframe.pt"]
+    assert (job / "aframe.pt").read_bytes() == b"w"
