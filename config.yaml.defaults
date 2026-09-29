@@ -137,6 +137,12 @@ services:
                     weights: null       # local path or OSDF URL for the aframe weights (.pt)
                     config: null        # local path or OSDF URL for the aframe config yaml
                     background: null    # local path or OSDF URL for the FAR background hdf5 (optional)
+                    # true => pass URL sources straight to transfer_input_files so the
+                    # worker pulls from the OSDF cache (no download to this host, no AP
+                    # spool). Requires the URL to end in the canonical basename, e.g.
+                    # igwn+osdf:///igwn/cit/staging/<user>/aframe/v1/aframe.pt. false =>
+                    # fetch here into the job sandbox (needs read_token_path for OSDF).
+                    transfer_urls: false
                 # Per-job scratch dir (inputs.json, etc.). Created on demand.
                 staging_dir: staging
                 auth:
