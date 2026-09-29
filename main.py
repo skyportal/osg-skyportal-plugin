@@ -682,6 +682,10 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     if not p0.get("singularity_image") and wrapper in WRAPPER_DEFAULT_IMAGE:
         submit_desc["+SingularityImage"] = f'"{WRAPPER_DEFAULT_IMAGE[wrapper]}"'
     _apply_igwn_ap(submit_desc, p0, defaults)
+    # oracle stages a per-object reference cutout (below) and ships it per proc via
+    # the $(extra_files) macro (empty for items whose cutout couldn't be fetched).
+    if wrapper == "oracle":
+        submit_desc["transfer_input_files"] = f"{transfer_files},$(inputs_json)$(extra_files)"
     env_parts = []
     env_parts.append(f"OSG_NUM_CPUS={p0.get('request_cpus', defaults['request_cpus'])}")
     if out_prefix:
@@ -698,10 +702,20 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
         job_dir = staging_root / cluster_uuid
         job_dir.mkdir(parents=True, exist_ok=True)
         (job_dir / "inputs.json").write_text(json.dumps(it.get("inputs") or {}))
+        # oracle: fetch the reference cutout from BOOM and ship it with this proc.
+        # ",<path>" so it appends after $(inputs_json); "" when unavailable.
+        extra_files = ""
+        if wrapper == "oracle":
+            import oracle_staging
+
+            staged = oracle_staging.stage_cutout(cfg, it.get("inputs") or {}, job_dir, log=log)
+            if staged:
+                extra_files = "," + str(staged[0])
         osdf_url = (out_prefix.rstrip("/") + f"/{cluster_uuid}.json") if out_prefix else ""
         itemdata.append(
             {
                 "inputs_json": str(job_dir / "inputs.json"),
+                "extra_files": extra_files,
                 "sp_name": it["analysis_name"],
                 "sp_cb": it.get("callback_url") or "",
                 "sp_cbm": it.get("callback_method") or "POST",
