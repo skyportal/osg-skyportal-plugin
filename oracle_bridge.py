@@ -104,14 +104,23 @@ def _to_float(value):
     return None if math.isnan(out) else out
 
 
+# A detection is a >=5-sigma point. ZTF magerr relates to SNR as SNR ~ 1.0857/magerr,
+# so 5 sigma is magerr <= 1.0857/5. This drops sub-threshold forced-photometry points
+# (SNR<5) that would otherwise be read as a light curve.
+DETECTION_SNR = 5.0
+_MAX_MAGERR = 1.0857 / DETECTION_SNR
+
+
 def photometry_rows(payload: dict) -> list[tuple]:
-    """Detections only, as (mjd, band, mag, magerr); upper limits and non-ZTF
-    filters are dropped. Sorted by time."""
+    """5-sigma detections only, as (mjd, band, mag, magerr); upper limits, non-ZTF
+    filters, and sub-5-sigma forced-photometry points are dropped. Sorted by time."""
     rows = []
     for r in _read_csv(payload.get("photometry")):
         band = FILTER_TO_BAND.get(str(r.get("filter", "")).strip().lower())
         mjd, mag, err = _to_float(r.get("mjd")), _to_float(r.get("mag")), _to_float(r.get("magerr"))
-        if band is None or mjd is None or mag is None or err is None:
+        if band is None or mjd is None or mag is None or err is None or err <= 0:
+            continue
+        if err > _MAX_MAGERR:  # SNR < 5
             continue
         rows.append((mjd, band, mag, err))
     return sorted(rows)

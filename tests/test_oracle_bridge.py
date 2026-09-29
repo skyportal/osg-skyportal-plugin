@@ -56,6 +56,16 @@ def test_photometry_rows_empty_when_no_ztf():
     assert oracle_bridge.photometry_rows(_payload(photometry=_csv([], PHOT_COLUMNS))) == []
 
 
+def test_photometry_rows_drops_sub_5sigma():
+    # magerr 0.5 -> SNR ~2.2 (a forced-photometry non-detection); 0.05 -> ~22 kept.
+    rows = [
+        {"mjd": 60001.0, "filter": "ztfg", "mag": 22.5, "magerr": 0.5, "limiting_mag": 20.3},
+        {"mjd": 60002.0, "filter": "ztfr", "mag": 18.5, "magerr": 0.05, "limiting_mag": 20.5},
+    ]
+    out = oracle_bridge.photometry_rows(_payload(photometry=_csv(rows, PHOT_COLUMNS)))
+    assert [r[1] for r in out] == ["r"] and out[0][2] == 18.5
+
+
 def test_no_detections_fails_gracefully():
     out = oracle_bridge.run_from_skyportal_inputs(_payload(photometry=_csv([], PHOT_COLUMNS)))
     assert out["status"] == "failure"
