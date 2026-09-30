@@ -110,3 +110,22 @@ def test_default_is_omni_pro_with_reference_channels():
 def test_load_cutout_missing_file_is_none():
     # Absent cutout degrades to None (a zero postage stamp), never raises.
     assert oracle_bridge._load_cutout("/nonexistent/oracle_cutout.fits.gz") is None
+
+
+def _rows(g, r, i=0):
+    return (
+        [(60000.0 + n, "g", 18.0, 0.05) for n in range(g)]
+        + [(60000.0 + n, "r", 18.0, 0.05) for n in range(r)]
+        + [(60000.0 + n, "i", 18.0, 0.05) for n in range(i)]
+    )
+
+
+def test_sufficient_gate_needs_8_total_and_2_each_gr():
+    assert oracle_bridge._sufficient(_rows(4, 4), {}) is True
+    assert oracle_bridge._sufficient(_rows(2, 2), {}) is False  # only 4 total
+    assert oracle_bridge._sufficient(_rows(8, 1), {}) is False  # <2 in r
+    assert oracle_bridge._sufficient(_rows(1, 8), {}) is False  # <2 in g
+    # i-band counts toward the total but not the per-band g/r requirement
+    assert oracle_bridge._sufficient(_rows(2, 2, 4), {}) is True
+    # thresholds are overridable per request
+    assert oracle_bridge._sufficient(_rows(2, 2), {"min_detections": 4}) is True

@@ -74,6 +74,25 @@ ORACLE_ORIGIN = "ORACLE"
 
 DEFAULT_MODEL = "BTSv2-pro"
 
+# Sufficiency gate: below this, ORACLE withholds the headline classification (it
+# still records the probability vector). On a sparse light curve the model is
+# confidently wrong -- a young SN or an AGN gets labelled Varstar/CV -- so we
+# mirror FLARE's rule (>=8 detections, >=2 each in g and r) and let the re-run
+# fire the confident call once the curve fills in. Overridable per request.
+MIN_DETECTIONS = 8
+MIN_PER_BAND = 2  # in each of g and r
+
+
+def _sufficient(rows, params: dict) -> bool:
+    min_det = int(params.get("min_detections", MIN_DETECTIONS))
+    min_band = int(params.get("min_per_band", MIN_PER_BAND))
+    if len(rows) < min_det:
+        return False
+    g = sum(1 for r in rows if r[1] == "g")
+    r = sum(1 for r in rows if r[1] == "r")
+    return g >= min_band and r >= min_band
+
+
 _MODEL = None
 _MODEL_KEY = None
 
@@ -310,18 +329,31 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     predicted = max(probs, key=probs.get)
     prob = probs[predicted]
 
+    sufficient = _sufficient(rows, params)
+    verdict = "ok" if sufficient else "insufficient_data"
     cutout = "with cutout" if os.path.exists(os.path.join(work_dir, CUTOUT_FILE)) else "no cutout"
     msg = f"ORACLE-2 ({model_choice}): {predicted} (p={prob:.3f}), {len(rows)} detections, {cutout}"
+    if not sufficient:
+        msg += " [insufficient_data: classification withheld]"
+    ann = {f"oracle_p_{k}": v for k, v in probs.items()}
+    ann["oracle_verdict"] = verdict
+    ann["oracle_n_det"] = len(rows)
     result = {
         "status": "success",
         "message": msg,
-        "results": {"model": model_choice, "predicted": predicted, "probabilities": probs},
-        "annotations": [
-            {"origin": ORACLE_ORIGIN, "data": {f"oracle_p_{k}": v for k, v in probs.items()}}
-        ],
+        "results": {
+            "model": model_choice,
+            "predicted": predicted,
+            "probabilities": probs,
+            "verdict": verdict,
+            "n_detections": len(rows),
+        },
+        "annotations": [{"origin": ORACLE_ORIGIN, "data": ann}],
     }
     label = ORACLE_TO_TAXONOMY.get(predicted)
-    if label:
+    # Withhold the headline ml classification on a sparse light curve; the
+    # probability vector above still records what the model thought.
+    if label and sufficient:
         result["classifications"] = [
             {
                 "taxonomy": ORACLE_TAXONOMY,
