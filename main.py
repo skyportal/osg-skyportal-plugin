@@ -342,6 +342,16 @@ def _stage_wrapper_job(
     if not use_wrapper:
         return {}, None
 
+    # aframe with transfer_urls lands each model file under its OSDF URL basename;
+    # tell the bridge/buoy those names (the config differs per model, e.g.
+    # bbh-config.yaml) so it reads what was staged. A per-request value wins.
+    if wrapper == "aframe" and (cfg.get("aframe") or {}).get("transfer_urls"):
+        for key in ("weights", "config", "background"):
+            url = (cfg.get("aframe") or {}).get(key)
+            if url:
+                params.setdefault(key, Path(url).name)
+        inputs["analysis_parameters"] = params
+
     # Absolute paths: with spool, HTCondor resolves relative transfer paths
     # against Iwd, which doubles them (staging/uuid/staging/uuid/...).
     staging_root = Path(cfg.get("staging_dir", "staging")).resolve()
