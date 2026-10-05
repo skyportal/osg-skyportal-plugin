@@ -2,8 +2,9 @@
 FLARE bridge — turns a SkyPortal photometry payload into a FLARE classification.
 
 Parses the payload here (stdlib only, like the other bridges, so tests import it
-in a lightweight env) and hands the detections, the redshift and the parameters
-to ``flare.skyportal.analyze`` in the FLARE image, which owns the science:
+in a lightweight env) and hands the detections, the redshift, the source's
+SkyPortal annotations and the parameters to ``flare.skyportal.analyze`` in the
+FLARE image, which owns the science:
 features, catalogue context, the hierarchical classifier, conformal sets, the
 anomaly energy and the triage verdict. Returns results / annotations / plots in
 the shape the wrapper packs for SkyPortal's callback.
@@ -11,6 +12,7 @@ the shape the wrapper packs for SkyPortal's callback.
 
 from __future__ import annotations
 
+import ast
 import csv
 import io
 import math
@@ -34,6 +36,26 @@ FILTERS = {
 
 def _params(payload: dict) -> dict:
     return dict(payload.get("analysis_parameters") or {})
+
+
+def merged_annotations(payload: dict) -> dict:
+    """Flatten every annotation's ``data`` dict into one lookup of the source's
+    catalogue context (sgscore1, distpsnr1, host separations, PS1 mags, ...).
+    Later rows win, so the most recently exported value for a repeated field is
+    the one kept."""
+    merged: dict = {}
+    for r in _read_csv(payload.get("annotations")):
+        data = r.get("data")
+        if isinstance(data, str):
+            try:
+                data = ast.literal_eval(data)
+            except (ValueError, SyntaxError):
+                continue
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if v is not None:
+                    merged[k] = v
+    return merged
 
 
 def _read_csv(value) -> list[dict]:
@@ -116,6 +138,9 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     params = _params(payload)
     # Skip FLARE's matplotlib PNG; SkyPortal renders the returned results natively.
     params.setdefault("plot", False)
+    # The source's catalogue context as SkyPortal holds it, so a verdict can be
+    # read against the host rather than the light curve alone.
+    params["annotations"] = merged_annotations(payload)
     # Keep the job deterministic: the rule verdict only. The LLM triage layer is
     # the flare_triage MCP tool, so every assistant call stays server-side.
     params["agent"] = False

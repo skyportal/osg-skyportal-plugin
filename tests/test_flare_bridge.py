@@ -92,6 +92,28 @@ def test_params_passthrough():
     )
 
 
+def test_merged_annotations_flattens_catalogue_context():
+    # SkyPortal exports annotations as a CSV whose `data` cell is a dict string.
+    ann = _csv(
+        [
+            {"data": "{'sgscore1': 0.02, 'distpsnr1': 3.0, 'drb': 0.31}", "origin": "BOOM"},
+            {"data": "{'neargaia': None, 'ps1_kron_r': 19.5}", "origin": "host"},
+        ],
+        ["data", "modified", "origin", "created_at"],
+    )
+    merged = flare_bridge.merged_annotations({"annotations": ann})
+    assert merged["sgscore1"] == 0.02
+    assert merged["distpsnr1"] == 3.0
+    assert merged["ps1_kron_r"] == 19.5
+    # A null is dropped rather than masking a later value.
+    assert "neargaia" not in merged
+
+
+def test_merged_annotations_without_any():
+    assert flare_bridge.merged_annotations({}) == {}
+    assert flare_bridge.merged_annotations({"annotations": None}) == {}
+
+
 def _result(predicted="SN_Ia"):
     return {
         "annotations": {"flare_class": predicted, "flare_p_max": 0.9},

@@ -93,7 +93,7 @@ wired here yet — it will hook into the SkyPortal assistant separately.
 uv run python register_analysis_service.py \
     --name FLARE_OSG --display "FLARE (OSG)" \
     --listener-url http://<plugin-host>:7100/analysis/flare_osg \
-    --input-data-types photometry redshift \
+    --input-data-types photometry redshift annotations \
     --optional-params-json "$(cat examples/flare_osg_parameters.json)" \
     --group-ids 1
 ```
