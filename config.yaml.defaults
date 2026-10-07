@@ -128,6 +128,17 @@ services:
                     # The delivered products alone are enough for a spectrum and a
                     # moment map; auxiliary adds calibration tables and the weblog.
                     include_auxiliary: false
+                    # Large products exceed the access point's spool cap, so route a
+                    # file over max_file_bytes through OSDF instead of spooling: the
+                    # pod streams it from the archive straight to the origin and
+                    # hands the worker the osdf:// URL to pull (public read, no worker
+                    # token). Opt-in: with osdf.url_base null, an oversized file is
+                    # skipped (the current behaviour), not staged.
+                    osdf:
+                        url_base: null   # osdf:// prefix handed to the worker, e.g. osdf:///umn-coughlin/alma
+                        put_base: null   # https:// origin endpoint the pod PUTs to, e.g. https://<origin>/umn-coughlin/alma
+                        write_token_path: null   # SciToken for the PUT (secret.pem from `pelican credentials token get write`)
+                        max_concurrent: 2   # cap on simultaneous streaming transfers, off the shared submit pool
                 aframe:
                     # aframe model files, staged with the job under the canonical
                     # basenames aframe.pt / aframe_config_bbh.yaml / background.hdf5.
