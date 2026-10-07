@@ -92,6 +92,40 @@ def test_feat_uses_alias_and_flag_fallback():
     assert oracle_bridge._feat({"drb": -999}, "drb", -9) == -9
 
 
+def test_boom_lightcurve_rows_matches_oracle_support_recipe():
+    prv = [
+        {"jd": 2460002.0, "fid": 2, "magpsf": 18.7, "sigmapsf": 0.06, "programid": 1},
+        {"jd": 2460000.0, "fid": 1, "magpsf": 18.5, "sigmapsf": 0.05, "programid": 1},
+        {
+            "jd": 2460001.0,
+            "fid": 1,
+            "magpsf": 19.0,
+            "sigmapsf": 0.9,
+            "programid": 1,
+        },  # kept: no 5σ cut
+        {
+            "jd": 2460003.0,
+            "fid": 2,
+            "magpsf": 18.2,
+            "sigmapsf": 0.04,
+            "programid": 3,
+        },  # dropped: programid 3
+        {
+            "jd": 2460004.0,
+            "fid": 1,
+            "magpsf": None,
+            "sigmapsf": None,
+            "programid": 1,
+        },  # non-detection
+    ]
+    rows = oracle_bridge.boom_lightcurve_rows(prv)
+    # Sorted by jd; programid-3 and the null-mag non-detection dropped; fid->band.
+    assert [r[1] for r in rows] == ["g", "g", "r"]
+    assert rows[0][0] == 2460000.0 and rows[0][2] == 18.5
+    assert any(r[3] == 0.9 for r in rows)  # faint point kept (unlike the SkyPortal 5σ path)
+    assert oracle_bridge.boom_lightcurve_rows([]) == []
+
+
 def test_wise_features_from_allwise_crossmatch():
     wise = oracle_bridge._wise_features(
         {"AllWISE": [{"w1mpro": 15.0, "w2mpro": 14.6, "w3mpro": 12.0, "w4mpro": 9.0}]}

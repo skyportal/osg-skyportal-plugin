@@ -149,6 +149,37 @@ def photometry_rows(payload: dict) -> list[tuple]:
     return sorted(rows)
 
 
+# ZTF alert-packet fid -> band; the model's wavelength lookup is keyed by band.
+_FID_TO_BAND = {1: "g", 2: "r", 3: "i"}
+
+
+def boom_lightcurve_rows(prv_candidates) -> list[tuple]:
+    """(jd, band, magpsf, sigmapsf) detections from the staged BOOM prv_candidates,
+    matching the real-time path (oracle_support): public+partnership programids
+    only, g/r/i detections, sorted by jd, NO 5-sigma cut -- ORACLE was trained on
+    the alert detection history, not SkyPortal's forced-photometry light curve.
+    (`jd` vs `mjd` is irrelevant: _build_batch subtracts the first epoch.)"""
+    rows = []
+    for p in prv_candidates or []:
+        try:
+            if int(p.get("programid", 1)) not in (1, 2):
+                continue
+        except (TypeError, ValueError):
+            continue
+        band = _FID_TO_BAND.get(p.get("fid"))
+        if band is None and p.get("band"):
+            band = str(p.get("band")).strip().lower()
+        if band not in ("g", "r", "i"):
+            continue
+        jd = _to_float(p.get("jd"))
+        mag = _to_float(p.get("magpsf"))
+        err = _to_float(p.get("sigmapsf"))
+        if jd is None or mag is None or err is None or err <= 0:
+            continue
+        rows.append((jd, band, mag, err))
+    return sorted(rows)
+
+
 def merged_annotations(payload: dict) -> dict:
     """Flatten every annotation's ``data`` dict into one lookup of alert fields
     (sgscore1, distpsnr1, ndethist, drb, PS1 mags, ...). Later rows win, so the
@@ -361,7 +392,14 @@ def _build_batch(rows, payload, torch, work_dir="."):
 
 
 def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir: str = ".") -> dict:
-    rows = photometry_rows(payload)
+    # Prefer the BOOM alert light curve the model was trained on (staged alongside
+    # the metadata); fall back to SkyPortal photometry when it isn't available.
+    prv = _load_alert(work_dir).get("prv_candidates")
+    rows = boom_lightcurve_rows(prv)
+    lc_source = "boom LC"
+    if not rows:
+        rows = photometry_rows(payload)
+        lc_source = "skyportal LC"
     if not rows:
         return {"status": "failure", "message": "no ZTF g/r/i detections in payload for ORACLE"}
 
@@ -392,7 +430,7 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     )
     msg = (
         f"ORACLE-2 ({model_choice}): {predicted} (p={prob:.3f}), "
-        f"{len(rows)} detections, {cutout}, {meta}"
+        f"{len(rows)} detections, {cutout}, {meta}, {lc_source}"
     )
     if not sufficient:
         msg += " [insufficient_data: classification withheld]"

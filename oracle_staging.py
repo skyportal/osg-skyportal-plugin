@@ -32,6 +32,9 @@ ALERT_FILE = "oracle_alert.json"
 # BOOM cutout keys for the reference image, most-specific first.
 TEMPLATE_KEYS = ("cutoutTemplate", "template", "cutoutReference", "reference")
 
+# Only ZTF alerts carry an ORACLE-trained BTS light curve; aux lives under this prefix.
+SURVEY = "ZTF"
+
 _DB_INITED = False
 
 
@@ -144,19 +147,53 @@ def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path
                 return []
             candid = latest.get("candid") or latest.get("_id")
 
-            # Alert metadata: the candidate fields the model needs, plus any
-            # cross-matches (AllWISE) the bridge turns into WISE colours.
+            # The alert doc (ZTF_alerts) carries the candidate; the detection
+            # history (prv_candidates) and cross-matches live in the aux doc. Pull
+            # the aux once so the bridge classifies the BOOM light curve ORACLE was
+            # trained on (magpsf/sigmapsf/fid), not SkyPortal photometry.
             candidate = latest.get("candidate") or {}
             cross_matches = (
                 latest.get("cross_matches") or latest.get("xmatch") or latest.get("aux") or {}
             )
-            if candidate:
+            prv_candidates = []
+            try:
+                from skyportal.broker_apis import boom as boom_api
+
+                res = boom_api._request(
+                    broker,
+                    "POST",
+                    "queries/find",
+                    json={
+                        "catalog_name": f"{SURVEY}_alerts_aux",
+                        "filter": {"_id": {"$in": [obj_id]}},
+                        "projection": {"prv_candidates": 1, "cross_matches": 1},
+                    },
+                )
+                docs = res.get("data") if isinstance(res, dict) else res
+                if isinstance(docs, dict):
+                    docs = docs.get("data", docs)
+                aux = (docs or [{}])[0] if isinstance(docs, list) and docs else {}
+                prv_candidates = aux.get("prv_candidates") or []
+                cross_matches = aux.get("cross_matches") or cross_matches
+            except Exception as e:  # noqa: BLE001 — bridge falls back to SkyPortal LC
+                log(f"oracle staging: aux fetch failed for {obj_id}: {e!r}")
+
+            if candidate or prv_candidates:
                 alert_path = job_dir / ALERT_FILE
                 alert_path.write_text(
-                    json.dumps({"candidate": candidate, "cross_matches": cross_matches})
+                    json.dumps(
+                        {
+                            "candidate": candidate,
+                            "cross_matches": cross_matches,
+                            "prv_candidates": prv_candidates,
+                        }
+                    )
                 )
                 staged.append(alert_path)
-                log(f"oracle staging: staged alert metadata for {obj_id} (candid {candid})")
+                log(
+                    f"oracle staging: staged alert metadata for {obj_id} "
+                    f"(candid {candid}, {len(prv_candidates)} prv_candidates)"
+                )
 
             cutouts = broker.broker_class.get_cutouts(
                 broker, candid, session, permissions=permissions
