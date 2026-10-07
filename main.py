@@ -256,6 +256,10 @@ WRAPPER_DEFAULT_IMAGE = {
     "flare": "osdf:///ospool/ap41/data/michael.coughlin/flare-v3.sif",
     # ORACLE runtime: the maintainer's image ships the oracle package + weights.
     "oracle": "/cvmfs/singularity.opensciencegrid.org/dev-ved30/oracle:main",
+    # FLEET runtime (fleet docker branch): bakes the RF pickles + SFD maps. Set to
+    # the CVMFS mirror of ghcr.io/<owner>/fleet once it's synced; docker:// works
+    # meanwhile.
+    "fleet": "docker://ghcr.io/gmzsebastian/fleet:latest",
 }
 
 # The GW searches pull whole .gwf frame files (O4 hoft frames are ~1.5 GB each,
@@ -281,6 +285,7 @@ WRAPPER_FILES = {
     "aframe": ("aframe_wrapper.py", ["aframe_bridge.py", "igwn_strain.py"]),
     "flare": ("flare_wrapper.py", ["flare_bridge.py"]),
     "oracle": ("oracle_wrapper.py", ["oracle_bridge.py"]),
+    "fleet": ("fleet_wrapper.py", ["fleet_bridge.py"]),
 }
 _FIESTA_FILES = ("fiesta_wrapper.py", ["fiesta_bridge.py", "redback_bridge.py"])
 
@@ -338,6 +343,7 @@ def _stage_wrapper_job(
         "aframe",
         "flare",
         "oracle",
+        "fleet",
     ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
         return {}, None
@@ -431,6 +437,13 @@ def _stage_wrapper_job(
         import oracle_staging
 
         transfer += [str(p) for p in oracle_staging.stage_cutout(cfg, inputs, job_dir, log=log)]
+
+    # fleet classifies offline from staged host-galaxy data; fetch it from BOOM
+    # here (the worker can't reach the archives FLEET would query). Non-fatal.
+    if wrapper == "fleet":
+        import fleet_staging
+
+        transfer += [str(p) for p in fleet_staging.stage_host(cfg, inputs, job_dir, log=log)]
 
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
     # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).
@@ -720,6 +733,12 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
             import oracle_staging
 
             staged = oracle_staging.stage_cutout(cfg, it.get("inputs") or {}, job_dir, log=log)
+            if staged:
+                extra_files = "".join("," + str(p) for p in staged)
+        elif wrapper == "fleet":
+            import fleet_staging
+
+            staged = fleet_staging.stage_host(cfg, it.get("inputs") or {}, job_dir, log=log)
             if staged:
                 extra_files = "".join("," + str(p) for p in staged)
         osdf_url = (out_prefix.rstrip("/") + f"/{cluster_uuid}.json") if out_prefix else ""
@@ -1218,6 +1237,8 @@ class AnalysisHandler(tornado.web.RequestHandler):
                     params.setdefault("wrapper", "flare")
                 elif "oracle" in name:
                     params.setdefault("wrapper", "oracle")
+                elif "fleet" in name:
+                    params.setdefault("wrapper", "fleet")
                 elif "redback" in name:
                     params.setdefault("backend", "redback")
 
@@ -1259,11 +1280,11 @@ class AnalysisHandler(tornado.web.RequestHandler):
             self.write({"status": "pending", "queued": True})
             return
 
-        if wrapper_name in ("alma", "oracle"):
+        if wrapper_name in ("alma", "oracle", "fleet"):
             # These stage before submitting with network I/O (alma downloads
-            # products; oracle fetches the reference cutout from BOOM), which can
-            # exceed SkyPortal's 30s request timeout if awaited here. Answer now
-            # and let the callback carry the outcome, as batch mode does.
+            # products; oracle/fleet fetch host data from BOOM), which can exceed
+            # SkyPortal's 30s request timeout if awaited here. Answer now and let
+            # the callback carry the outcome, as batch mode does.
             def _submit_bg():
                 try:
                     submit_job(
