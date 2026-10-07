@@ -51,6 +51,10 @@ FILTER_TO_BAND = {
 # A few Oracle metadata feature names differ from the annotation field names.
 META_ALIASES = {"scorr": ("scorr", "zogy_scorr")}
 
+# oracle BTS flag_value for a missing feature (kept local to avoid importing the
+# oracle package, which needs torch, into the listener/tests).
+ORACLE_FLAG = -9
+
 # ZTF band -> postage-stamp channel; the reference cutout goes in the last
 # detection's band, matching the BOOM path (oracle_support).
 BAND_TO_CHANNEL = {"g": 0, "r": 1, "i": 2}
@@ -211,26 +215,30 @@ def _feat(merged: dict, name: str, flag: float) -> float:
 
 def _wise_features(cross_matches: dict) -> dict:
     """WISE columns the model expects, from the AllWISE cross-match (mirrors
-    oracle_support): the absolute mags and the W1-W3 / W2-W3 colours."""
+    oracle_support): the absolute mags, and the W1-W3 / W2-W3 colours.
+
+    The colours are ALWAYS emitted as ``(mag or flag) - (mag or flag)``, matching
+    oracle_support's construction. BOOM carries no AllWISE at all (it crossmatches
+    CatWISE2020, which lacks W3/W4), so WISE is absent on every object: the colours
+    then come out ``flag - flag == 0.0``, which is what the model was run with in the
+    real-time path. Emitting the flag value here instead (the obvious reading) feeds
+    the model -9 where it expects 0.0 on two static features, every time."""
     cm = cross_matches or {}
     wise = cm.get("AllWISE") or cm.get("allwise") or []
     w0 = (wise[0] if isinstance(wise, list) and wise else wise) or {}
-    if not isinstance(w0, dict):
-        return {}
     out, w = {}, {}
-    for src, dst in (
-        ("w1mpro", "W1mag"),
-        ("w2mpro", "W2mag"),
-        ("w3mpro", "W3mag"),
-        ("w4mpro", "W4mag"),
-    ):
-        v = _to_float(w0.get(src))
-        if v is not None:
-            out[dst] = w[dst] = v
-    if "W1mag" in w and "W3mag" in w:
-        out["W1_minus_W3"] = w["W1mag"] - w["W3mag"]
-    if "W2mag" in w and "W3mag" in w:
-        out["W2_minus_W3"] = w["W2mag"] - w["W3mag"]
+    if isinstance(w0, dict):
+        for src, dst in (
+            ("w1mpro", "W1mag"),
+            ("w2mpro", "W2mag"),
+            ("w3mpro", "W3mag"),
+            ("w4mpro", "W4mag"),
+        ):
+            v = _to_float(w0.get(src))
+            if v is not None:
+                out[dst] = w[dst] = v
+    out["W1_minus_W3"] = w.get("W1mag", ORACLE_FLAG) - w.get("W3mag", ORACLE_FLAG)
+    out["W2_minus_W3"] = w.get("W2mag", ORACLE_FLAG) - w.get("W3mag", ORACLE_FLAG)
     return out
 
 

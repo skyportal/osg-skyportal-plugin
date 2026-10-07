@@ -132,9 +132,12 @@ def test_wise_features_from_allwise_crossmatch():
     )
     assert wise["W1mag"] == 15.0 and wise["W4mag"] == 9.0
     assert wise["W1_minus_W3"] == 3.0 and round(wise["W2_minus_W3"], 1) == 2.6
-    # No AllWISE -> no WISE columns (the model gets the flag value instead).
-    assert oracle_bridge._wise_features({}) == {}
-    assert oracle_bridge._wise_features(None) == {}
+    # BOOM has no AllWISE, so WISE is absent on every object: the colours must come
+    # out 0.0 (flag - flag), matching oracle_support, NOT the -9 flag value. The
+    # absolute mags are omitted (the bridge then flags them, as oracle_support does).
+    for absent in ({}, None, {"PS1_DR2": [{}]}):
+        w = oracle_bridge._wise_features(absent)
+        assert w == {"W1_minus_W3": 0, "W2_minus_W3": 0}
 
 
 def test_metadata_prefers_staged_alert_over_annotations(tmp_path):
@@ -154,7 +157,8 @@ def test_metadata_prefers_staged_alert_over_annotations(tmp_path):
 def test_metadata_without_alert_is_annotations_only(tmp_path):
     ann = _csv([{"data": "{'sky': 1.0}", "origin": "BOOM"}], ["data", "origin"])
     merged = oracle_bridge._metadata({"annotations": ann}, str(tmp_path))
-    assert merged == {"sky": 1.0}
+    # Annotations overlaid with the (always-present) WISE colours, 0.0 when absent.
+    assert merged == {"sky": 1.0, "W1_minus_W3": 0, "W2_minus_W3": 0}
 
 
 def test_taxonomy_map_covers_bts_leaves():
