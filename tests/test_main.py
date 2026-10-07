@@ -738,6 +738,30 @@ def test_submit_jobs_batch_one_cluster_many_procs(plugin_cfg, tmp_path, last_sub
     assert "has_avx" in last_submit_desc["requirements"]
 
 
+def test_batch_oracle_ships_all_staged_files(plugin_cfg, tmp_path, last_itemdata, monkeypatch):
+    """A batched oracle proc's extra_files carries every staged path (alert metadata
+    AND cutout), not just the first -- each as a leading-comma append."""
+    import oracle_staging
+
+    staged = [tmp_path / "oracle_alert.json", tmp_path / "oracle_cutout.fits.gz"]
+    for p in staged:
+        p.write_text("x")
+    monkeypatch.setattr(oracle_staging, "stage_cutout", lambda *a, **k: staged)
+
+    main.submit_jobs_batch(
+        plugin_cfg,
+        [
+            {
+                "analysis_name": "oracle_osg",
+                "resource_id": "OBJ",
+                "inputs": {"analysis_parameters": {"wrapper": "oracle"}},
+            }
+        ],
+    )
+    extra = last_itemdata[0]["extra_files"]
+    assert extra == "".join("," + str(p) for p in staged)
+
+
 def test_merge_jax_cache_folds_returned_entries(plugin_cfg, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # Shared cache lives outside cwd; a job's returned dir shares its basename.

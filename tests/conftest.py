@@ -22,6 +22,7 @@ class _FakeTxn:
 
 
 _LAST_SUBMIT_DESC: dict = {}
+_LAST_ITEMDATA: list = []
 
 
 def _strip_classad_quotes(value):
@@ -73,6 +74,8 @@ class _FakeSchedd:
     def submit(self, sub, count=1, spool=False, itemdata=None):
         # htcondor2 path: one cluster, one proc per itemdata row (or `count`).
         items = list(itemdata) if itemdata is not None else [None] * count
+        _LAST_ITEMDATA.clear()
+        _LAST_ITEMDATA.extend(items)
         cid = _NEXT_CLUSTER_ID[0]
         _NEXT_CLUSTER_ID[0] += 1
         for proc, _item in enumerate(items):
@@ -225,3 +228,8 @@ def fake_history() -> list[dict]:
 @pytest.fixture
 def last_submit_desc() -> dict:
     return _LAST_SUBMIT_DESC
+
+
+@pytest.fixture
+def last_itemdata() -> list:
+    return _LAST_ITEMDATA

@@ -712,15 +712,16 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
         job_dir = staging_root / cluster_uuid
         job_dir.mkdir(parents=True, exist_ok=True)
         (job_dir / "inputs.json").write_text(json.dumps(it.get("inputs") or {}))
-        # oracle: fetch the reference cutout from BOOM and ship it with this proc.
-        # ",<path>" so it appends after $(inputs_json); "" when unavailable.
+        # oracle: fetch the BOOM alert metadata + reference cutout and ship them
+        # with this proc. ",<path>,..." so they append after $(inputs_json); "" when
+        # nothing was staged.
         extra_files = ""
         if wrapper == "oracle":
             import oracle_staging
 
             staged = oracle_staging.stage_cutout(cfg, it.get("inputs") or {}, job_dir, log=log)
             if staged:
-                extra_files = "," + str(staged[0])
+                extra_files = "".join("," + str(p) for p in staged)
         osdf_url = (out_prefix.rstrip("/") + f"/{cluster_uuid}.json") if out_prefix else ""
         itemdata.append(
             {
