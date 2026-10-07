@@ -114,6 +114,15 @@ def test_merged_annotations_without_any():
     assert flare_bridge.merged_annotations({"annotations": None}) == {}
 
 
+def test_load_context_reads_staged_file(tmp_path):
+    import json
+
+    (tmp_path / flare_bridge.CONTEXT_FILE).write_text(json.dumps({"wise": {"w1mpro": 15.0}}))
+    assert flare_bridge._load_context(str(tmp_path)) == {"wise": {"w1mpro": 15.0}}
+    # Absent/invalid -> {} so the job falls back to FLARE's live fetch.
+    assert flare_bridge._load_context(str(tmp_path / "nope")) == {}
+
+
 def _result(predicted="SN_Ia"):
     return {
         "annotations": {"flare_class": predicted, "flare_p_max": 0.9},

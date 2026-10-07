@@ -15,10 +15,16 @@ from __future__ import annotations
 import ast
 import csv
 import io
+import json
 import math
+import os
 from pathlib import Path
 
 csv.field_size_limit(10**9)
+
+# BOOM context staged by the listener (flare_staging); turns FLARE's context block
+# offline when present. Absent -> FLARE fetches it live, as before.
+CONTEXT_FILE = "flare_context.json"
 
 # SkyPortal filter names -> ZTF fid (g=1, r=2, i=3), the order flare.fetch.to_events expects.
 FILTERS = {
@@ -132,15 +138,28 @@ FLARE_TO_TAXONOMY = {
 FLARE_ORIGIN = "FLARE"
 
 
+def _load_context(work_dir: str) -> dict:
+    """The BOOM context staged by the listener (flare_staging), or {} if absent."""
+    path = os.path.join(work_dir, CONTEXT_FILE)
+    if not os.path.exists(path):
+        return {}
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:  # noqa: BLE001 — context is optional; fall back to live fetch
+        return {}
+
+
 def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir: str = ".") -> dict:
     from flare.skyportal import analyze  # in the FLARE image
 
     params = _params(payload)
     # Skip FLARE's matplotlib PNG; SkyPortal renders the returned results natively.
     params.setdefault("plot", False)
-    # The source's catalogue context as SkyPortal holds it, so a verdict can be
-    # read against the host rather than the light curve alone.
-    params["annotations"] = merged_annotations(payload)
+    # BOOM context staged by the listener -> FLARE runs its context block offline
+    # (no MAST/Data Lab fetch on the worker). Absent -> FLARE fetches it live.
+    ctx = _load_context(work_dir)
+    if ctx:
+        params["context_data"] = ctx
     # Keep the job deterministic: the rule verdict only. The LLM triage layer is
     # the flare_triage MCP tool, so every assistant call stays server-side.
     params["agent"] = False

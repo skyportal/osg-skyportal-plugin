@@ -445,6 +445,14 @@ def _stage_wrapper_job(
 
         transfer += [str(p) for p in fleet_staging.stage_host(cfg, inputs, job_dir, log=log)]
 
+    # flare: optionally stage its external context from BOOM so the worker runs the
+    # context block offline instead of fetching MAST/Data Lab live (opt-in via
+    # flare.use_boom_context). Non-fatal; absent -> live fetch.
+    if wrapper == "flare":
+        import flare_staging
+
+        transfer += [str(p) for p in flare_staging.stage_context(cfg, inputs, job_dir, log=log)]
+
     # Cross-job JAX compile cache: ship a shared pre-warmed cache dir in so repeat
     # fits reuse compiled kernels. Fiesta-only (periodfind doesn't use JAX).
     # Absent/empty => wrapper's per-job cache. The dir lands in the sandbox under
@@ -739,6 +747,12 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
             import fleet_staging
 
             staged = fleet_staging.stage_host(cfg, it.get("inputs") or {}, job_dir, log=log)
+            if staged:
+                extra_files = "".join("," + str(p) for p in staged)
+        elif wrapper == "flare":
+            import flare_staging
+
+            staged = flare_staging.stage_context(cfg, it.get("inputs") or {}, job_dir, log=log)
             if staged:
                 extra_files = "".join("," + str(p) for p in staged)
         osdf_url = (out_prefix.rstrip("/") + f"/{cluster_uuid}.json") if out_prefix else ""
@@ -1280,11 +1294,12 @@ class AnalysisHandler(tornado.web.RequestHandler):
             self.write({"status": "pending", "queued": True})
             return
 
-        if wrapper_name in ("alma", "oracle", "fleet"):
+        if wrapper_name in ("alma", "oracle", "fleet", "flare"):
             # These stage before submitting with network I/O (alma downloads
-            # products; oracle/fleet fetch host data from BOOM), which can exceed
+            # products; oracle/fleet/flare fetch data from BOOM), which can exceed
             # SkyPortal's 30s request timeout if awaited here. Answer now and let
-            # the callback carry the outcome, as batch mode does.
+            # the callback carry the outcome, as batch mode does. (flare only stages
+            # when flare.use_boom_context is set; otherwise this returns instantly.)
             def _submit_bg():
                 try:
                     submit_job(

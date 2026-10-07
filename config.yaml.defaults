@@ -143,6 +143,12 @@ services:
                     # igwn+osdf:///igwn/cit/staging/<user>/aframe/v1/aframe.pt. false =>
                     # fetch here into the job sandbox (needs read_token_path for OSDF).
                     transfer_urls: false
+                flare:
+                    # true => stage FLARE's external context (Gaia/WISE/PS1/photo-z)
+                    # from BOOM at submit time so the worker runs its context block
+                    # offline, instead of fetching MAST/Data Lab live. false (default)
+                    # keeps the live fetch. See flare_staging.py.
+                    use_boom_context: false
                 # Per-job scratch dir (inputs.json, etc.). Created on demand.
                 staging_dir: staging
                 auth:
