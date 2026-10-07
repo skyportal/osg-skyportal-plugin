@@ -92,6 +92,37 @@ def test_feat_uses_alias_and_flag_fallback():
     assert oracle_bridge._feat({"drb": -999}, "drb", -9) == -9
 
 
+def test_wise_features_from_allwise_crossmatch():
+    wise = oracle_bridge._wise_features(
+        {"AllWISE": [{"w1mpro": 15.0, "w2mpro": 14.6, "w3mpro": 12.0, "w4mpro": 9.0}]}
+    )
+    assert wise["W1mag"] == 15.0 and wise["W4mag"] == 9.0
+    assert wise["W1_minus_W3"] == 3.0 and round(wise["W2_minus_W3"], 1) == 2.6
+    # No AllWISE -> no WISE columns (the model gets the flag value instead).
+    assert oracle_bridge._wise_features({}) == {}
+    assert oracle_bridge._wise_features(None) == {}
+
+
+def test_metadata_prefers_staged_alert_over_annotations(tmp_path):
+    # Annotation has a stale sky; the staged BOOM alert's candidate wins and the
+    # training fields the annotations lack (fwhm, chinr, ...) come through.
+    ann = _csv([{"data": "{'sky': 1.0, 'sgscore1': 0.5}", "origin": "BOOM"}], ["data", "origin"])
+    (tmp_path / oracle_bridge.ALERT_FILE).write_text(
+        '{"candidate": {"sky": 2.5, "fwhm": 2.1, "chinr": 0.3, "sharpnr": -0.1},'
+        ' "cross_matches": {"AllWISE": [{"w1mpro": 15.0, "w3mpro": 12.0}]}}'
+    )
+    merged = oracle_bridge._metadata({"annotations": ann}, str(tmp_path))
+    assert merged["sky"] == 2.5 and merged["fwhm"] == 2.1 and merged["chinr"] == 0.3
+    assert merged["sgscore1"] == 0.5  # annotation-only field preserved
+    assert merged["W1_minus_W3"] == 3.0
+
+
+def test_metadata_without_alert_is_annotations_only(tmp_path):
+    ann = _csv([{"data": "{'sky': 1.0}", "origin": "BOOM"}], ["data", "origin"])
+    merged = oracle_bridge._metadata({"annotations": ann}, str(tmp_path))
+    assert merged == {"sky": 1.0}
+
+
 def test_taxonomy_map_covers_bts_leaves():
     # The seven BTS_Taxonomy leaves each map to a Sitewide Taxonomy (id 1019) label.
     expected = {"SN-Ia", "SN-II", "SN-Ib/c", "SLSN", "AGN", "CV", "Varstar"}

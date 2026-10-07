@@ -19,11 +19,15 @@ the BOOM path with an absent template.
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
-# Must match oracle_bridge.CUTOUT_FILE (kept local to avoid importing the bridge,
-# and its CUDA env side effect, into the listener).
+# Must match oracle_bridge.CUTOUT_FILE / ALERT_FILE (kept local to avoid importing
+# the bridge, and its CUDA env side effect, into the listener).
 CUTOUT_FILE = "oracle_cutout.fits.gz"
+# The full BOOM alert candidate (sky, fwhm, diffmaglim, chinr, sharpnr, PS1 mags,
+# ...): the metadata the model was trained on, which SkyPortal annotations lack.
+ALERT_FILE = "oracle_alert.json"
 
 # BOOM cutout keys for the reference image, most-specific first.
 TEMPLATE_KEYS = ("cutoutTemplate", "template", "cutoutReference", "reference")
@@ -50,8 +54,8 @@ def _gzip_fits_bytes(field) -> bytes | None:
     return None
 
 
-def _latest_candid(alerts) -> str | None:
-    """The candid of the most recent alert (by candidate jd, else the candid)."""
+def _latest_alert(alerts) -> dict | None:
+    """The most recent alert (by candidate jd, else jd)."""
     if not isinstance(alerts, list) or not alerts:
         return None
 
@@ -59,8 +63,7 @@ def _latest_candid(alerts) -> str | None:
         cand = a.get("candidate") or {}
         return cand.get("jd") or a.get("jd") or 0
 
-    best = max(alerts, key=jd)
-    return best.get("candid") or best.get("_id")
+    return max(alerts, key=jd)
 
 
 def _ensure_db() -> None:
@@ -80,13 +83,22 @@ def _ensure_db() -> None:
 
 
 def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path]:
-    """Write the reference cutout into job_dir; return [path] or [] if unavailable."""
+    """Stage the BOOM alert metadata (candidate + cross-matches) and the reference
+    cutout for an ORACLE job; return the staged paths ([] if nothing available).
+
+    The alert candidate carries the full static/metadata the model was trained on
+    (sky, fwhm, diffmaglim, chinr, sharpnr, PS1 mags, ...), which SkyPortal
+    annotations are missing -- so the bridge prefers it over annotations. Best
+    effort throughout: each piece is independent and absence just degrades the job.
+    """
     obj = inputs.get("obj") or {}
     obj_id = obj.get("id") or inputs.get("resource_id")
     if not obj_id:
-        log("oracle staging: no obj id in inputs; no cutout")
+        log("oracle staging: no obj id in inputs; nothing staged")
         return []
 
+    job_dir = Path(job_dir)
+    staged: list[Path] = []
     try:
         import sqlalchemy as sa
 
@@ -107,7 +119,7 @@ def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path
                 .order_by(Broker.default_alert_search.desc(), Broker.id)
             ).first()
             if broker is None:
-                log("oracle staging: no active BOOM broker; no cutout")
+                log("oracle staging: no active BOOM broker; nothing staged")
                 return []
 
             # Scope to the streams the source's own groups grant: the classifier
@@ -126,24 +138,39 @@ def stage_cutout(cfg: dict, inputs: dict, job_dir: Path, log=print) -> list[Path
             alerts = broker.broker_class.query_alerts(
                 broker, session, objectId=obj_id, permissions=permissions
             )
-            candid = _latest_candid(alerts)
-            if candid is None:
-                log(f"oracle staging: no accessible BOOM alert for {obj_id}; no cutout")
+            latest = _latest_alert(alerts)
+            if latest is None:
+                log(f"oracle staging: no accessible BOOM alert for {obj_id}; nothing staged")
                 return []
+            candid = latest.get("candid") or latest.get("_id")
+
+            # Alert metadata: the candidate fields the model needs, plus any
+            # cross-matches (AllWISE) the bridge turns into WISE colours.
+            candidate = latest.get("candidate") or {}
+            cross_matches = (
+                latest.get("cross_matches") or latest.get("xmatch") or latest.get("aux") or {}
+            )
+            if candidate:
+                alert_path = job_dir / ALERT_FILE
+                alert_path.write_text(
+                    json.dumps({"candidate": candidate, "cross_matches": cross_matches})
+                )
+                staged.append(alert_path)
+                log(f"oracle staging: staged alert metadata for {obj_id} (candid {candid})")
 
             cutouts = broker.broker_class.get_cutouts(
                 broker, candid, session, permissions=permissions
             )
             field = next((cutouts[k] for k in TEMPLATE_KEYS if cutouts.get(k) is not None), None)
             raw = _gzip_fits_bytes(field)
-            if not raw:
+            if raw:
+                cutout_path = job_dir / CUTOUT_FILE
+                cutout_path.write_bytes(raw)
+                staged.append(cutout_path)
+                log(f"oracle staging: staged reference cutout for {obj_id} (candid {candid})")
+            else:
                 log(f"oracle staging: no reference cutout for {obj_id} (candid {candid})")
-                return []
-    except Exception as e:  # noqa: BLE001 — cutout is optional; the job runs without it
-        log(f"oracle staging: cutout fetch failed for {obj_id}: {e!r}")
-        return []
+    except Exception as e:  # noqa: BLE001 — staging is optional; the job runs without it
+        log(f"oracle staging: fetch failed for {obj_id}: {e!r}")
 
-    out = Path(job_dir) / CUTOUT_FILE
-    out.write_bytes(raw)
-    log(f"oracle staging: staged reference cutout for {obj_id} (candid {candid})")
-    return [out]
+    return staged

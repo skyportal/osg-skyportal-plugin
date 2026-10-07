@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import csv
 import io
+import json
 import math
 import os
 from pathlib import Path
@@ -56,6 +57,9 @@ BAND_TO_CHANNEL = {"g": 0, "r": 1, "i": 2}
 
 # Reference cutout staged into the sandbox by the listener (gzipped FITS bytes).
 CUTOUT_FILE = "oracle_cutout.fits.gz"
+# Full BOOM alert metadata staged by the listener (candidate + cross_matches);
+# the model's training features live here, not in the sparse SkyPortal annotations.
+ALERT_FILE = "oracle_alert.json"
 
 ORACLE_TAXONOMY = "Sitewide Taxonomy"
 # ORACLE-2 BTS leaf classes -> nearest Sitewide Taxonomy label (id 1019).
@@ -174,6 +178,55 @@ def _feat(merged: dict, name: str, flag: float) -> float:
     return flag
 
 
+def _wise_features(cross_matches: dict) -> dict:
+    """WISE columns the model expects, from the AllWISE cross-match (mirrors
+    oracle_support): the absolute mags and the W1-W3 / W2-W3 colours."""
+    cm = cross_matches or {}
+    wise = cm.get("AllWISE") or cm.get("allwise") or []
+    w0 = (wise[0] if isinstance(wise, list) and wise else wise) or {}
+    if not isinstance(w0, dict):
+        return {}
+    out, w = {}, {}
+    for src, dst in (
+        ("w1mpro", "W1mag"),
+        ("w2mpro", "W2mag"),
+        ("w3mpro", "W3mag"),
+        ("w4mpro", "W4mag"),
+    ):
+        v = _to_float(w0.get(src))
+        if v is not None:
+            out[dst] = w[dst] = v
+    if "W1mag" in w and "W3mag" in w:
+        out["W1_minus_W3"] = w["W1mag"] - w["W3mag"]
+    if "W2mag" in w and "W3mag" in w:
+        out["W2_minus_W3"] = w["W2mag"] - w["W3mag"]
+    return out
+
+
+def _load_alert(work_dir: str) -> dict:
+    """The BOOM alert metadata (candidate + cross_matches) staged by the listener."""
+    path = os.path.join(work_dir, ALERT_FILE)
+    if not os.path.exists(path):
+        return {}
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:  # noqa: BLE001 — metadata is optional; fall back to annotations
+        return {}
+
+
+def _metadata(payload: dict, work_dir: str) -> dict:
+    """Feature lookup for the static vector: the full BOOM alert candidate the model
+    was trained on (sky, fwhm, diffmaglim, chinr, sharpnr, PS1 mags, ...), plus WISE
+    colours from its cross-matches, staged by the listener -- with the source's
+    SkyPortal annotations as a fallback for whatever the alert lacks. Without the
+    alert this degrades to annotations-only (the old, metadata-starved behaviour)."""
+    merged = merged_annotations(payload)
+    alert = _load_alert(work_dir)
+    merged.update({k: v for k, v in (alert.get("candidate") or {}).items() if v is not None})
+    merged.update(_wise_features(alert.get("cross_matches")))
+    return merged
+
+
 def _galactic(payload: dict) -> tuple:
     """Galactic (l, b) from the obj ra/dec SkyPortal sends with the request."""
     obj = payload.get("obj") or {}
@@ -281,7 +334,7 @@ def _build_batch(rows, payload, torch, work_dir="."):
         ts[0, i, 2] = err
         ts[0, i, 3] = ZTF_passband_to_wavelengths[band]
 
-    merged = merged_annotations(payload)
+    merged = _metadata(payload, work_dir)
     lb = _galactic(payload)
     static_vals = []
     for col in time_independent_feature_list:
@@ -332,7 +385,15 @@ def run_from_skyportal_inputs(payload: dict, resource_id: str = "obj", work_dir:
     sufficient = _sufficient(rows, params)
     verdict = "ok" if sufficient else "insufficient_data"
     cutout = "with cutout" if os.path.exists(os.path.join(work_dir, CUTOUT_FILE)) else "no cutout"
-    msg = f"ORACLE-2 ({model_choice}): {predicted} (p={prob:.3f}), {len(rows)} detections, {cutout}"
+    meta = (
+        "alert metadata"
+        if os.path.exists(os.path.join(work_dir, ALERT_FILE))
+        else "annotations only"
+    )
+    msg = (
+        f"ORACLE-2 ({model_choice}): {predicted} (p={prob:.3f}), "
+        f"{len(rows)} detections, {cutout}, {meta}"
+    )
     if not sufficient:
         msg += " [insufficient_data: classification withheld]"
     ann = {f"oracle_p_{k}": v for k, v in probs.items()}

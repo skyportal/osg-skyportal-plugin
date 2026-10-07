@@ -1,4 +1,4 @@
-"""Pure-logic tests for oracle_staging (no DB): latest-candid selection, the BOOM
+"""Pure-logic tests for oracle_staging (no DB): latest-alert selection, the BOOM
 cutout field decode, and the best-effort guards that skip the fetch. The in-process
 DB fetch itself needs a live SkyPortal and is exercised there, not here."""
 
@@ -8,19 +8,18 @@ import gzip
 import oracle_staging
 
 
-def test_latest_candid_picks_highest_jd():
+def test_latest_alert_picks_highest_jd():
     alerts = [
         {"_id": "a", "candidate": {"jd": 2460000.5}},
         {"_id": "b", "candidate": {"jd": 2460010.5}},
         {"_id": "c", "candidate": {"jd": 2460005.5}},
     ]
-    # candid is nested; the top-level _id equals it, so _latest_candid falls back to it.
-    assert oracle_staging._latest_candid(alerts) == "b"
+    assert oracle_staging._latest_alert(alerts)["_id"] == "b"
 
 
-def test_latest_candid_empty_is_none():
-    assert oracle_staging._latest_candid([]) is None
-    assert oracle_staging._latest_candid(None) is None
+def test_latest_alert_empty_is_none():
+    assert oracle_staging._latest_alert([]) is None
+    assert oracle_staging._latest_alert(None) is None
 
 
 def test_gzip_fits_bytes_from_base64_and_stampdata():
