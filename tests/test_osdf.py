@@ -22,34 +22,108 @@ def test_is_osdf_url(url, expected):
     assert osdf.is_osdf_url(url) is expected
 
 
-def test_upload_uses_bearer_when_token_env_set(tmp_path, monkeypatch):
+@pytest.fixture(autouse=True)
+def _clear_origin_cache():
+    osdf._write_origin_cache.clear()
+    yield
+    osdf._write_origin_cache.clear()
+
+
+ORIGIN = "https://kennesaw-origin.nrp.org:50092"
+
+
+def _resp(status, headers=None, raise_exc=None):
+    r = MagicMock()
+    r.status_code = status
+    r.headers = headers or {}
+    r.raise_for_status = (lambda: (_ for _ in ()).throw(raise_exc)) if raise_exc else (lambda: None)
+    return r
+
+
+def _put_side(drained=None):
+    """requests.put stand-in: a .probe URL resolves (307 -> origin), any other URL
+    is the real PUT and its streamed body is drained so the counter advances."""
+
+    def side(url, data=None, headers=None, allow_redirects=True, timeout=None):
+        if url.endswith("/.probe"):
+            return _resp(307, {"Location": f"{ORIGIN}/umn-coughlin/.probe"})
+        if hasattr(data, "read"):
+            while data.read(1 << 16):
+                pass
+        if drained is not None:
+            drained.append(url)
+        return _resp(200)
+
+    return side
+
+
+def test_upload_resolves_then_puts_to_origin_with_bearer(tmp_path, monkeypatch):
     local = tmp_path / "input.txt"
     local.write_bytes(b"hello")
     tok = tmp_path / "tok"
     tok.write_text("abc.def.ghi\n")
     monkeypatch.setenv("BEARER_TOKEN_FILE", str(tok))
     with patch("osdf.requests.put") as mput:
-        mput.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
-        osdf.upload(local, "https://origin/foo")
-        assert mput.called
-        _, kwargs = mput.call_args
-        assert kwargs["headers"]["Authorization"] == "Bearer abc.def.ghi"
+        mput.side_effect = _put_side()
+        osdf.upload(local, "osdf:///umn-coughlin/f.txt")
+    # First call resolves via the sentinel; second is the authenticated PUT to the
+    # resolved origin (not the director), with the body size declared and no redirect.
+    assert mput.call_count == 2
+    probe_url = mput.call_args_list[0].args[0]
+    assert probe_url.endswith("/umn-coughlin/.probe")
+    put_url, put_kwargs = mput.call_args_list[1].args[0], mput.call_args_list[1].kwargs
+    assert put_url == f"{ORIGIN}/umn-coughlin/f.txt"
+    assert put_kwargs["headers"]["Authorization"] == "Bearer abc.def.ghi"
+    assert put_kwargs["headers"]["Content-Length"] == "5"
+    assert put_kwargs["allow_redirects"] is False
 
 
-def test_upload_no_token_no_header(tmp_path, monkeypatch):
-    local = tmp_path / "input.txt"
-    local.write_bytes(b"hello")
-    monkeypatch.delenv("BEARER_TOKEN_FILE", raising=False)
+def test_resolve_caches_per_namespace(monkeypatch):
     with patch("osdf.requests.put") as mput:
-        mput.return_value = MagicMock(raise_for_status=lambda: None)
-        osdf.upload(local, "https://origin/foo")
-        _, kwargs = mput.call_args
-        assert "Authorization" not in kwargs["headers"]
+        mput.side_effect = _put_side()
+        a = osdf.resolve_origin_base("osdf:///umn-coughlin/a.tar")
+        b = osdf.resolve_origin_base("osdf:///umn-coughlin/b.tar")
+    assert a == b == ORIGIN
+    assert mput.call_count == 1  # second resolve served from cache
+
+
+def test_upload_stream_auth_failure_raises_permissionerror(monkeypatch):
+    monkeypatch.delenv("BEARER_TOKEN_FILE", raising=False)
+
+    def side(url, data=None, headers=None, allow_redirects=True, timeout=None):
+        if url.endswith("/.probe"):
+            return _resp(307, {"Location": f"{ORIGIN}/umn-coughlin/.probe"})
+        return _resp(403)
+
+    import io
+
+    with patch("osdf.requests.put", side_effect=side):
+        with pytest.raises(PermissionError):
+            osdf.upload_stream("osdf:///umn-coughlin/f.tar", io.BytesIO(b"x"))
+
+
+def test_upload_stream_truncation_raises(monkeypatch):
+    import io
+
+    def side(url, data=None, headers=None, allow_redirects=True, timeout=None):
+        if url.endswith("/.probe"):
+            return _resp(307, {"Location": f"{ORIGIN}/umn-coughlin/.probe"})
+        return _resp(200)  # never reads the body -> counter stays 0
+
+    with patch("osdf.requests.put", side_effect=side):
+        with pytest.raises(OSError, match="truncated"):
+            osdf.upload_stream("osdf:///umn-coughlin/f.tar", io.BytesIO(b"xxxxx"), content_length=5)
 
 
 def test_upload_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         osdf.upload(tmp_path / "does-not-exist", "https://origin/foo")
+
+
+def test_read_url_translates_osdf_but_passes_https():
+    assert osdf._read_url("osdf:///umn-coughlin/x.tar").startswith(osdf.OSDF_DIRECTOR)
+    assert osdf._read_url("igwn+osdf:///igwn/x.pt").startswith(osdf.OSDF_DIRECTOR)
+    assert osdf._read_url("https://origin/x") == "https://origin/x"
 
 
 def test_download_streams_to_disk(tmp_path):
