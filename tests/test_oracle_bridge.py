@@ -132,6 +132,11 @@ def test_wise_features_from_allwise_crossmatch():
     )
     assert wise["W1mag"] == 15.0 and wise["W4mag"] == 9.0
     assert wise["W1_minus_W3"] == 3.0 and round(wise["W2_minus_W3"], 1) == 2.6
+    # A source found with one band of the colour masked -> the flag, not a real
+    # difference against the other band (which training never computes).
+    partial = oracle_bridge._wise_features({"AllWISE": [{"w1mpro": 15.0, "w3mpro": 12.0}]})
+    assert partial["W1_minus_W3"] == 3.0
+    assert partial["W2_minus_W3"] == oracle_bridge.ORACLE_FLAG
     # BOOM has no AllWISE, so WISE is absent on every object: the colours must come
     # out 0.0 (flag - flag), matching oracle_support, NOT the -9 flag value. The
     # absolute mags are omitted (the bridge then flags them, as oracle_support does).

@@ -213,16 +213,24 @@ def _feat(merged: dict, name: str, flag: float) -> float:
     return flag
 
 
+def _wise_color(m1: float, m2: float, all_missing: bool) -> float:
+    """A WISE colour matching the training convention's two missing cases: no WISE
+    source at all (all four mags flagged) -> 0.0, because training writes the flag
+    into every mag and subtracts raw (flag - flag == 0.0); a source with one band
+    unmeasured -> the flag, because that band is NaN in training and maps to it."""
+    if all_missing:
+        return 0.0
+    if m1 == ORACLE_FLAG or m2 == ORACLE_FLAG:
+        return ORACLE_FLAG
+    return m1 - m2
+
+
 def _wise_features(cross_matches: dict) -> dict:
     """WISE columns the model expects, from the AllWISE cross-match (mirrors
     oracle_support): the absolute mags, and the W1-W3 / W2-W3 colours.
 
-    The colours are ALWAYS emitted as ``(mag or flag) - (mag or flag)``, matching
-    oracle_support's construction. BOOM carries no AllWISE at all (it crossmatches
-    CatWISE2020, which lacks W3/W4), so WISE is absent on every object: the colours
-    then come out ``flag - flag == 0.0``, which is what the model was run with in the
-    real-time path. Emitting the flag value here instead (the obvious reading) feeds
-    the model -9 where it expects 0.0 on two static features, every time."""
+    The colours follow the training convention's two missing cases (see
+    ``_wise_color``): no WISE source -> 0.0, a masked band -> the flag."""
     cm = cross_matches or {}
     wise = cm.get("AllWISE") or cm.get("allwise") or []
     w0 = (wise[0] if isinstance(wise, list) and wise else wise) or {}
@@ -237,8 +245,13 @@ def _wise_features(cross_matches: dict) -> dict:
             v = _to_float(w0.get(src))
             if v is not None:
                 out[dst] = w[dst] = v
-    out["W1_minus_W3"] = w.get("W1mag", ORACLE_FLAG) - w.get("W3mag", ORACLE_FLAG)
-    out["W2_minus_W3"] = w.get("W2mag", ORACLE_FLAG) - w.get("W3mag", ORACLE_FLAG)
+    w1 = w.get("W1mag", ORACLE_FLAG)
+    w2 = w.get("W2mag", ORACLE_FLAG)
+    w3 = w.get("W3mag", ORACLE_FLAG)
+    w4 = w.get("W4mag", ORACLE_FLAG)
+    all_missing = all(m == ORACLE_FLAG for m in (w1, w2, w3, w4))
+    out["W1_minus_W3"] = _wise_color(w1, w3, all_missing)
+    out["W2_minus_W3"] = _wise_color(w2, w3, all_missing)
     return out
 
 
