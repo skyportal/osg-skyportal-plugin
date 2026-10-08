@@ -39,6 +39,12 @@ log = make_log("osg")
 # serializing them (which made the app's start request time out under bursts).
 _SUBMIT_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="osg-submit")
 
+# ALMA submits that stream a large product to OSDF hold their worker for the whole
+# archive-to-origin transfer (hours for the big datasets), so they run in their own
+# small pool rather than _SUBMIT_POOL: that both caps concurrent streams and keeps
+# them from starving every other analysis's submission.
+_ALMA_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="osg-alma")
+
 # Read-side schedd work (poller, rehydrate, keepalive) runs here, off the event
 # loop, so a hung security negotiation (SECMAN read failure) can't freeze the
 # HTTP listener. Single worker => these stay serialized (one schedd read
@@ -401,20 +407,27 @@ def _stage_wrapper_job(
                 "max_cubes", alma_cfg.get("max_datasets", alma_staging.DEFAULT_MAX_DATASETS)
             ),
         )
-        staged, notes = alma_staging.stage(
+        osdf_alma = alma_cfg.get("osdf") or {}
+        # Over max_file_bytes a product streams to OSDF (worker pulls the URL)
+        # instead of spooling through the access point's cap; url_base null keeps
+        # the skip-oversized behaviour.
+        staged, alma_staged_bytes, notes = alma_staging.stage(
             inputs,
             job_dir / "alma",
             max_bytes=int(alma_cfg.get("max_stage_bytes", alma_staging.DEFAULT_MAX_BYTES)),
             include_auxiliary=bool(alma_cfg.get("include_auxiliary", False)),
             max_datasets=int(max_datasets) if max_datasets else None,
             max_file_bytes=int(alma_cfg.get("max_file_bytes", alma_staging.DEFAULT_MAX_FILE_BYTES)),
+            osdf_url_base=osdf_alma.get("url_base"),
+            osdf_token_path=osdf_alma.get("write_token_path"),
+            cluster_uuid=cluster_uuid,
         )
         for note in notes:
             log(f"alma staging: {note}")
-        transfer += [str(path) for path in staged]
-        # The worker unpacks what it receives, so scratch and walltime have to
-        # follow the staged bytes; the 1 GB default only fits the small datasets.
-        alma_staged_bytes = sum(p.stat().st_size for p in staged if p.exists())
+        # Items are local paths to spool or osdf:// URLs the worker pulls; the staged
+        # byte count comes back explicitly (an OSDF item has no local file to stat)
+        # and drives job sizing: the worker unpacks what it receives either way.
+        transfer += staged
 
     # aframe needs its weights + config (and an optional FAR background) on the
     # worker, under the canonical basenames the bridge expects. Sources may be
@@ -1326,7 +1339,10 @@ class AnalysisHandler(tornado.web.RequestHandler):
                         str(e),
                     )
 
-            asyncio.get_running_loop().run_in_executor(_SUBMIT_POOL, _submit_bg)
+            # ALMA may stream a large product to OSDF for the whole transfer, so it
+            # gets the dedicated pool; the rest are quick BOOM fetches on _SUBMIT_POOL.
+            pool = _ALMA_POOL if wrapper_name == "alma" else _SUBMIT_POOL
+            asyncio.get_running_loop().run_in_executor(pool, _submit_bg)
             self.write({"status": "pending", "queued": True})
             return
 

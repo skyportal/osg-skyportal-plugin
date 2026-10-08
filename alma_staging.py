@@ -147,6 +147,38 @@ def datalink_rows(uid: str) -> list[dict]:
     return rows
 
 
+# Keep this much pod disk free when spooling a small product, so a download can
+# never fill the shared web pod's root filesystem.
+DEFAULT_MIN_FREE_BYTES = 5 * 1024**3
+# Re-open the archive stream this many times if the origin redirects mid-PUT (the
+# streamed body is spent and cannot replay).
+_OSDF_RETRIES = 2
+
+
+def _stream_to_osdf(url, object_url, token_path, content_length):
+    """Stream one archive product straight into the OSDF origin, never landing it
+    on pod disk. The body can't replay across a redirect, so on an origin move we
+    re-open the archive GET and upload again, bounded."""
+    import requests
+
+    import osdf
+
+    for attempt in range(_OSDF_RETRIES):
+        with requests.get(url, stream=True, timeout=600) as response:
+            response.raise_for_status()
+            response.raw.decode_content = True  # hand osdf decoded bytes, not gzip
+            length = content_length or int(response.headers.get("Content-Length") or 0) or None
+            try:
+                osdf.upload_stream(
+                    object_url, response.raw, token_path=token_path, content_length=length
+                )
+                return length or content_length or 0
+            except osdf.UploadNeedsRetry:
+                if attempt + 1 >= _OSDF_RETRIES:
+                    raise
+    return 0
+
+
 def stage(
     inputs: dict,
     dest: Path,
@@ -154,18 +186,28 @@ def stage(
     include_auxiliary: bool = False,
     max_datasets: int = DEFAULT_MAX_DATASETS,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
-) -> tuple[list[Path], list[str]]:
-    """Download the products for this request into `dest`.
+    osdf_url_base: str | None = None,
+    osdf_token_path: str | None = None,
+    cluster_uuid: str | None = None,
+    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+) -> tuple[list[str], int, list[str]]:
+    """Stage the products for this request, returning (transfer items, bytes, notes).
 
-    Returns the staged paths and any notes worth surfacing (datasets skipped
-    for size, datasets the archive had nothing downloadable for).
+    Each item is a local path to spool or an ``osdf://`` URL for the worker to pull.
+    A product over ``max_file_bytes`` is streamed to ``osdf_url_base/<cluster_uuid>/``
+    when OSDF is configured (never landing on pod disk), else skipped as before.
+    Smaller products are downloaded to ``dest`` and spooled, refused if the pod lacks
+    free space. ``bytes`` is the total staged volume, from the archive content length
+    rather than stat (an OSDF item has no local file to stat), and drives job sizing.
     """
+    import shutil
+
     import requests
 
     dest.mkdir(parents=True, exist_ok=True)
     uids = dataset_uids(inputs)
     if not uids:
-        return [], ["No ALMA datasets named in the request or its annotations"]
+        return [], 0, ["No ALMA datasets named in the request or its annotations"]
     notes: list[str] = []
 
     # A source can carry dozens of datasets; fetching every one that fits the
@@ -173,7 +215,8 @@ def stage(
     # bound is on datasets actually staged, not on candidates considered: the
     # archive lists plenty with no delivered products at all, and stopping at
     # those would strand a request whose usable data sits further down.
-    staged, budget, taken = [], max_bytes, 0
+    transfer: list[str] = []
+    staged_bytes, budget, taken = 0, max_bytes, 0
     for uid in uids:
         if max_datasets and taken >= max_datasets:
             notes.append(f"staged {taken} of {len(uids)} datasets; raise max_datasets to widen")
@@ -186,13 +229,6 @@ def stage(
         if not plan["files"]:
             notes.append(f"{uid}: no delivered products on offer")
             continue
-        oversized = [f for f in plan["files"] if max_file_bytes and f["bytes"] > max_file_bytes]
-        if oversized:
-            notes.append(
-                f"{uid}: skipped, {max(f['bytes'] for f in oversized) / 1e6:.0f} MB file "
-                f"exceeds the {max_file_bytes / 1e6:.0f} MB the access point will transfer"
-            )
-            continue
         if plan["total_bytes"] > budget:
             notes.append(
                 f"{uid}: skipped, {plan['total_bytes'] / 1e6:.0f} MB exceeds the "
@@ -200,17 +236,48 @@ def stage(
             )
             continue
 
+        staged_any = False
         for entry in plan["files"]:
+            size = entry["bytes"]
+            oversized = bool(max_file_bytes) and size > max_file_bytes
+            if oversized and not osdf_url_base:
+                notes.append(
+                    f"{uid}: skipped {entry['filename']}, {size / 1e6:.0f} MB exceeds the "
+                    f"{max_file_bytes / 1e6:.0f} MB the access point will transfer and OSDF is off"
+                )
+                continue
+            if oversized:
+                object_url = f"{osdf_url_base.rstrip('/')}/{cluster_uuid}/{entry['filename']}"
+                try:
+                    sent = _stream_to_osdf(entry["url"], object_url, osdf_token_path, size)
+                except Exception as e:  # noqa: BLE001 -- one failed upload keeps the rest
+                    notes.append(f"{uid}: OSDF upload of {entry['filename']} failed ({e})")
+                    continue
+                transfer.append(object_url)
+                staged_bytes += sent or size
+                budget -= size
+                staged_any = True
+                continue
+            # Spool a small product, but never fill the shared pod's filesystem.
+            if shutil.disk_usage(dest).free < size + min_free_bytes:
+                notes.append(
+                    f"{uid}: skipped {entry['filename']}, not enough free pod disk to spool"
+                )
+                continue
             target = dest / entry["filename"]
             with requests.get(entry["url"], stream=True, timeout=600) as response:
                 response.raise_for_status()
                 with open(target, "wb") as fh:
                     for chunk in response.iter_content(chunk_size=1 << 20):
                         fh.write(chunk)
-            staged.append(target)
-            budget -= target.stat().st_size
-        taken += 1
+            transfer.append(str(target))
+            written = target.stat().st_size
+            staged_bytes += written
+            budget -= written
+            staged_any = True
+        if staged_any:
+            taken += 1
 
-    if not staged and not notes:
+    if not transfer and not notes:
         notes.append("Nothing was staged for this request")
-    return staged, notes
+    return transfer, staged_bytes, notes

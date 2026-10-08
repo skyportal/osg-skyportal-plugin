@@ -93,14 +93,14 @@ def test_annotations_arriving_as_csv_are_parsed():
 
 
 def test_no_datasets_anywhere_is_reported_not_guessed(tmp_path):
-    staged, notes = alma_staging.stage({}, tmp_path)
+    staged, _bytes, notes = alma_staging.stage({}, tmp_path)
     assert staged == []
     assert "No ALMA datasets" in notes[0]
 
 
 def test_a_dataset_over_budget_is_skipped_with_a_note(tmp_path, monkeypatch):
     monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: DATALINK)
-    staged, notes = alma_staging.stage(
+    staged, _bytes, notes = alma_staging.stage(
         {"analysis_parameters": {"dataset_uids": ["uid://A/1"]}},
         tmp_path,
         max_bytes=1_000_000,
@@ -117,7 +117,7 @@ def test_a_dataset_the_archive_cannot_serve_does_not_lose_the_others(tmp_path, m
 
     monkeypatch.setattr(alma_staging, "datalink_rows", rows)
     # max_datasets is what this test is not about, so let both through.
-    staged, notes = alma_staging.stage(
+    staged, _bytes, notes = alma_staging.stage(
         {"analysis_parameters": {"dataset_uids": ["uid://BAD", "uid://OK"]}},
         tmp_path,
         max_datasets=None,
@@ -136,7 +136,7 @@ def test_only_max_datasets_are_fetched(tmp_path, monkeypatch):
         return []  # no products, so nothing downloads
 
     monkeypatch.setattr(alma_staging, "datalink_rows", rows)
-    _, notes = alma_staging.stage(
+    _staged, _bytes, notes = alma_staging.stage(
         {"analysis_parameters": {"dataset_uids": [f"uid://A/{i}" for i in range(9)]}},
         tmp_path,
         max_datasets=2,
@@ -161,7 +161,7 @@ def test_max_datasets_none_means_no_count_limit(tmp_path, monkeypatch):
 def test_the_byte_budget_still_backs_the_count_limit(tmp_path, monkeypatch):
     """Delivered products vary by an order of magnitude, so both bounds apply."""
     monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: DATALINK)
-    staged, notes = alma_staging.stage(
+    staged, _bytes, notes = alma_staging.stage(
         {"analysis_parameters": {"dataset_uids": ["uid://A/1"]}},
         tmp_path,
         max_bytes=1_000_000,
@@ -212,7 +212,7 @@ def test_unusable_datasets_do_not_consume_the_dataset_budget(tmp_path, monkeypat
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    staged, notes = alma_staging.stage(
+    staged, _bytes, notes = alma_staging.stage(
         {
             "analysis_parameters": {
                 "dataset_uids": ["uid://A/EMPTY1", "uid://A/EMPTY2", "uid://A/GOOD"]
@@ -221,7 +221,7 @@ def test_unusable_datasets_do_not_consume_the_dataset_budget(tmp_path, monkeypat
         tmp_path,
         max_datasets=1,
     )
-    assert len(staged) == 1 and staged[0].name == "small.tar"
+    assert len(staged) == 1 and staged[0].endswith("small.tar")
     assert downloaded == ["https://almascience.org/dl/small.tar"]
 
 
@@ -236,10 +236,51 @@ def test_a_dataset_too_large_for_the_access_point_is_not_downloaded(monkeypatch,
         raise AssertionError("oversized dataset must not be downloaded")
 
     monkeypatch.setattr("requests.get", fail)
-    staged, notes = alma_staging.stage(
+    staged, _bytes, notes = alma_staging.stage(
         {"analysis_parameters": {"dataset_uids": ["uid://X/1"]}},
         tmp_path,
         max_bytes=12 * 1024**3,
     )
     assert staged == []
     assert any("access point will transfer" in n for n in notes)
+
+
+def test_oversized_file_streams_to_osdf_and_sizes_from_content_length(tmp_path, monkeypatch):
+    """A product over the cap streams to OSDF (no local file) and its byte count
+    comes from the datalink length, so job sizing survives having no file to stat."""
+    rows = [
+        {"access_url": "https://a/big.tar", "semantics": "#this", "content_length": 50 * 1000**3}
+    ]
+    monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: rows)
+    seen = {}
+
+    def fake_stream(url, object_url, token_path, content_length):
+        seen.update(url=url, object_url=object_url, length=content_length)
+        return content_length
+
+    monkeypatch.setattr(alma_staging, "_stream_to_osdf", fake_stream)
+    staged, nbytes, notes = alma_staging.stage(
+        {"analysis_parameters": {"dataset_uids": ["uid://X/1"]}},
+        tmp_path,
+        max_bytes=100 * 1024**3,
+        osdf_url_base="osdf:///umn-coughlin/alma",
+        cluster_uuid="abc123",
+    )
+    assert staged == ["osdf:///umn-coughlin/alma/abc123/big.tar"]
+    assert nbytes == 50 * 1000**3  # threaded from content_length, not stat of a missing file
+    assert seen["object_url"].endswith("/abc123/big.tar")
+
+
+def test_spool_refused_when_pod_disk_is_low(tmp_path, monkeypatch):
+    from collections import namedtuple
+
+    rows = [{"access_url": "https://a/small.tar", "semantics": "#this", "content_length": 1000}]
+    monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: rows)
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr("shutil.disk_usage", lambda p: usage(100, 100, 0))
+    staged, nbytes, notes = alma_staging.stage(
+        {"analysis_parameters": {"dataset_uids": ["uid://X/1"]}},
+        tmp_path,
+    )
+    assert staged == [] and nbytes == 0
+    assert any("free pod disk" in n for n in notes)
