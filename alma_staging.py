@@ -155,10 +155,11 @@ DEFAULT_MIN_FREE_BYTES = 5 * 1024**3
 _OSDF_RETRIES = 2
 
 
-def _stream_to_osdf(url, object_url, token_path, content_length):
+def _stream_to_osdf(url, object_url, token_path, keypair_path, pelican_bin, content_length):
     """Stream one archive product straight into the OSDF origin, never landing it
     on pod disk. The body can't replay across a redirect, so on an origin move we
-    re-open the archive GET and upload again, bounded."""
+    re-open the archive GET and upload again (bounded); each attempt re-mints the
+    token if it is near expiry, so a late retry does not reuse a stale one."""
     import requests
 
     import osdf
@@ -170,7 +171,12 @@ def _stream_to_osdf(url, object_url, token_path, content_length):
             length = content_length or int(response.headers.get("Content-Length") or 0) or None
             try:
                 osdf.upload_stream(
-                    object_url, response.raw, token_path=token_path, content_length=length
+                    object_url,
+                    response.raw,
+                    token_path=token_path,
+                    keypair_path=keypair_path,
+                    pelican_bin=pelican_bin,
+                    content_length=length,
                 )
                 return length or content_length or 0
             except osdf.UploadNeedsRetry:
@@ -188,6 +194,8 @@ def stage(
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     osdf_url_base: str | None = None,
     osdf_token_path: str | None = None,
+    osdf_keypair_path: str | None = None,
+    osdf_pelican_bin: str = "pelican",
     cluster_uuid: str | None = None,
     min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
 ) -> tuple[list[str], int, list[str]]:
@@ -249,7 +257,14 @@ def stage(
             if oversized:
                 object_url = f"{osdf_url_base.rstrip('/')}/{cluster_uuid}/{entry['filename']}"
                 try:
-                    sent = _stream_to_osdf(entry["url"], object_url, osdf_token_path, size)
+                    sent = _stream_to_osdf(
+                        entry["url"],
+                        object_url,
+                        osdf_token_path,
+                        osdf_keypair_path,
+                        osdf_pelican_bin,
+                        size,
+                    )
                 except Exception as e:  # noqa: BLE001 -- one failed upload keeps the rest
                     notes.append(f"{uid}: OSDF upload of {entry['filename']} failed ({e})")
                     continue

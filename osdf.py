@@ -7,7 +7,12 @@ CLI-free (no `pelican` binary dependency) so the plugin can run in minimal
 containers.
 """
 
+import base64
+import json
 import os
+import re
+import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -24,6 +29,12 @@ _write_origin_cache: dict[str, str] = {}
 # Bound on origin re-resolution per upload, so an expired token (a permanent 403,
 # or a persistent redirect) cannot become a probe loop around every transfer.
 MAX_UPLOAD_ATTEMPTS = 2
+
+# Minted bearer tokens cached per namespace. The cache is keyed on the token's own
+# exp, not a wall clock, so a retry hours after the first attempt re-mints rather
+# than reusing a token that was valid when the first attempt began.
+_token_cache: dict[str, tuple[str, float]] = {}
+TOKEN_REFRESH_MARGIN_S = 300
 
 
 class UploadNeedsRetry(RuntimeError):
@@ -95,10 +106,57 @@ def resolve_origin_base(object_url: str, force: bool = False) -> str:
     raise RuntimeError(f"OSDF write-origin resolution for {ns} returned HTTP {r.status_code}")
 
 
+def _jwt_exp(token: str) -> float:
+    """The exp claim (epoch seconds) of a JWT, or 0 if unreadable."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def mint_token(
+    keypair_path: str, object_url: str, pelican_bin: str = "pelican", scope: str = "write"
+) -> str:
+    """Mint a short-lived bearer token for the object's namespace from the Pelican
+    keypair credential file (secret.pem), via the pelican client.
+
+    The keypair carries offline_access, so this re-mints with no browser; a pod can
+    hold secret.pem as a static secret and refresh indefinitely. Cached per
+    namespace and re-minted within TOKEN_REFRESH_MARGIN_S of the token's own expiry,
+    so a retry long after the first attempt gets a fresh token rather than a 403."""
+    ns = _namespace(urlparse(object_url).path)
+    cached = _token_cache.get(ns)
+    if cached and cached[1] - time.time() > TOKEN_REFRESH_MARGIN_S:
+        return cached[0]
+    env = {**os.environ, "PELICAN_CLIENT_CREDENTIALFILE": os.path.expanduser(keypair_path)}
+    proc = subprocess.run(
+        [pelican_bin, "credentials", "token", "get", scope, f"osdf:///{ns}", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"pelican token mint failed (exit {proc.returncode}): {proc.stderr[-300:]}"
+        )
+    m = re.search(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", proc.stdout)
+    if not m:
+        raise RuntimeError("pelican token mint produced no JWT")
+    token = m.group(0)
+    _token_cache[ns] = (token, _jwt_exp(token) or time.time() + 1800)
+    return token
+
+
 def upload_stream(
     object_url: str,
     source,
     token_path: str | None = None,
+    keypair_path: str | None = None,
+    pelican_bin: str = "pelican",
     content_length: int | None = None,
     timeout: int = 7200,
     _attempt: int = 0,
@@ -116,7 +174,12 @@ def upload_stream(
     p = urlparse(object_url)
     base = resolve_origin_base(object_url, force=(_attempt > 0))
     target = f"{base}/{p.path.lstrip('/')}"
-    headers = _headers(_bearer(token_path))
+    # A keypair mints a fresh token (checked against its own exp, so a retry re-mints);
+    # otherwise a static bearer from token_path.
+    token = (
+        mint_token(keypair_path, object_url, pelican_bin) if keypair_path else _bearer(token_path)
+    )
+    headers = _headers(token)
     counter = {"n": 0}
     body = source
     if content_length is not None:

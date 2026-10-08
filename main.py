@@ -420,6 +420,8 @@ def _stage_wrapper_job(
             max_file_bytes=int(alma_cfg.get("max_file_bytes", alma_staging.DEFAULT_MAX_FILE_BYTES)),
             osdf_url_base=osdf_alma.get("url_base"),
             osdf_token_path=osdf_alma.get("write_token_path"),
+            osdf_keypair_path=osdf_alma.get("keypair_path"),
+            osdf_pelican_bin=osdf_alma.get("pelican_path", "pelican"),
             cluster_uuid=cluster_uuid,
         )
         for note in notes:

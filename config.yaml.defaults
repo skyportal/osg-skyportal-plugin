@@ -136,8 +136,15 @@ services:
                     # skipped (the current behaviour), not staged.
                     osdf:
                         url_base: null   # osdf:// prefix handed to the worker, e.g. osdf:///umn-coughlin/alma
-                        put_base: null   # https:// origin endpoint the pod PUTs to, e.g. https://<origin>/umn-coughlin/alma
-                        write_token_path: null   # SciToken for the PUT (secret.pem from `pelican credentials token get write`)
+                        # The write credential is a Pelican keypair (secret.pem from
+                        # `pelican credentials token get write osdf://<ns>`), not a bearer
+                        # token: it mints short-lived tokens non-interactively (offline_access),
+                        # so it sits here as a static secret and the pod re-mints per upload
+                        # via the pelican client. keypair_path is preferred; write_token_path
+                        # is a fallback for a static bearer.
+                        keypair_path: null        # path to the Pelican keypair credential (secret.pem)
+                        pelican_path: pelican     # pelican client used to mint the token from the keypair
+                        write_token_path: null    # fallback: a static bearer SciToken file
                         max_concurrent: 2   # cap on simultaneous streaming transfers, off the shared submit pool
                 aframe:
                     # aframe model files, staged with the job under the canonical

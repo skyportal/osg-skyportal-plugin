@@ -254,7 +254,7 @@ def test_oversized_file_streams_to_osdf_and_sizes_from_content_length(tmp_path, 
     monkeypatch.setattr(alma_staging, "datalink_rows", lambda uid: rows)
     seen = {}
 
-    def fake_stream(url, object_url, token_path, content_length):
+    def fake_stream(url, object_url, token_path, keypair_path, pelican_bin, content_length):
         seen.update(url=url, object_url=object_url, length=content_length)
         return content_length
 

@@ -23,10 +23,22 @@ def test_is_osdf_url(url, expected):
 
 
 @pytest.fixture(autouse=True)
-def _clear_origin_cache():
+def _clear_caches():
     osdf._write_origin_cache.clear()
+    osdf._token_cache.clear()
     yield
     osdf._write_origin_cache.clear()
+    osdf._token_cache.clear()
+
+
+def _fake_jwt(exp: int) -> str:
+    import base64
+    import json
+
+    def seg(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+
+    return f"{seg({'alg': 'RS256'})}.{seg({'exp': exp, 'scope': 'storage.create:/'})}.sig"
 
 
 ORIGIN = "https://kennesaw-origin.nrp.org:50092"
@@ -154,3 +166,53 @@ def test_download_prefers_explicit_token_path(tmp_path, monkeypatch):
         osdf.download("https://origin/foo", tmp_path / "out.bin", token_path=str(tok))
         _, kwargs = mget.call_args
         assert kwargs["headers"]["Authorization"] == "Bearer from-arg"
+
+
+def test_mint_token_caches_until_near_exp(monkeypatch):
+    import time
+
+    tok = _fake_jwt(int(time.time()) + 3600)
+    calls = []
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kw: calls.append(cmd) or MagicMock(returncode=0, stdout=tok, stderr=""),
+    )
+    a = osdf.mint_token("/x/secret.pem", "osdf:///umn-coughlin/a.tar", pelican_bin="pel")
+    b = osdf.mint_token("/x/secret.pem", "osdf:///umn-coughlin/b.tar")  # same namespace
+    assert a == b == tok and len(calls) == 1  # minted once, served from cache
+    assert calls[0][:4] == ["pel", "credentials", "token", "get"]
+
+
+def test_mint_token_remints_when_cached_is_expired(monkeypatch):
+    import time
+
+    seq = [_fake_jwt(int(time.time()) - 10), _fake_jwt(int(time.time()) + 3600)]
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: MagicMock(returncode=0, stdout=seq.pop(0), stderr="")
+    )
+    first = osdf.mint_token("/x/s.pem", "osdf:///ns1/a.tar")
+    second = osdf.mint_token("/x/s.pem", "osdf:///ns1/a.tar")  # cached one is expired -> re-mint
+    assert first != second
+
+
+def test_mint_token_failure_raises(monkeypatch):
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: MagicMock(returncode=1, stdout="", stderr="boom")
+    )
+    with pytest.raises(RuntimeError, match="mint failed"):
+        osdf.mint_token("/x/s.pem", "osdf:///ns1/a.tar")
+
+
+def test_upload_stream_mints_from_keypair_and_puts_with_it(monkeypatch):
+    import io
+    import time
+
+    tok = _fake_jwt(int(time.time()) + 3600)
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kw: MagicMock(returncode=0, stdout=tok, stderr="")
+    )
+    with patch("osdf.requests.put", side_effect=_put_side()) as mput:
+        osdf.upload_stream("osdf:///umn-coughlin/f.tar", io.BytesIO(b"x"), keypair_path="/x/s.pem")
+    # the real PUT (not the .probe resolve) carries the minted token
+    put = [c for c in mput.call_args_list if not c.args[0].endswith("/.probe")][0]
+    assert put.kwargs["headers"]["Authorization"] == f"Bearer {tok}"
