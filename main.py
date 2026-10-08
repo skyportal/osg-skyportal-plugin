@@ -596,14 +596,14 @@ def submit_job(
         # non-Linux host otherwise defaults requirements to the local platform.
         "requirements": '(Arch == "X86_64") && (OpSys == "LINUX")',
     }
-    # jaxlib (used by the fiesta surrogate models) is built with AVX, so it
-    # SIGILLs on pre-AVX glideins. Require the CPU advertise AVX: ~99% of OSPool
-    # slots set has_avx (vs 87% at Microarch>=x86_64-v3, which needlessly drops
-    # older AVX-only CPUs jaxlib runs on). Slots not advertising it evaluate
-    # UNDEFINED and are skipped — safe by design. Tunable via
-    # defaults.cpu_requirements (set "" to disable) or per-request.
+    # The torch/jax wheels in these containers are built for x86_64-v3, so they
+    # execute AVX2/FMA instructions that x86_64-v2 CPUs lack and SIGILL (exit 132).
+    # has_avx is NOT enough — v2 nodes advertise AVX but not AVX2 — so require the
+    # v3 microarch baseline. ~91% of OSPool slots are v3/v4; the ~9% v2 slots cannot
+    # run these jobs anyway. Slots not advertising Microarch evaluate UNDEFINED and
+    # are skipped — safe by design. Tunable via defaults.cpu_requirements ("" disables).
     cpu_requirements = params.get(
-        "cpu_requirements", defaults.get("cpu_requirements", "(has_avx == True)")
+        "cpu_requirements", defaults.get("cpu_requirements", '(Microarch >= "x86_64-v3")')
     )
     if cpu_requirements:
         submit_desc["requirements"] += f" && {cpu_requirements}"
@@ -717,7 +717,9 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
         "+SkyPortalResourceId": '"$(sp_rid)"',
         "+SkyPortalOsdfOutput": '"$(sp_osdf)"',
     }
-    cpu_req = p0.get("cpu_requirements", defaults.get("cpu_requirements", "(has_avx == True)"))
+    cpu_req = p0.get(
+        "cpu_requirements", defaults.get("cpu_requirements", '(Microarch >= "x86_64-v3")')
+    )
     if cpu_req:
         submit_desc["requirements"] += f" && {cpu_req}"
     _apply_gpu_and_image(submit_desc, p0, defaults)

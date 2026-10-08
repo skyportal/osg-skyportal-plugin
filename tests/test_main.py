@@ -610,10 +610,11 @@ def test_submit_desc_is_remote_safe(plugin_cfg, last_submit_desc):
         callback_method="POST",
         inputs={},
     )
-    # Target OSPool Linux/x86_64 (+ AVX for jaxlib); don't ship the local executable.
+    # Target OSPool Linux/x86_64 (+ x86_64-v3 for the AVX2 torch/jax wheels); don't
+    # ship the local executable.
     assert (
         last_submit_desc["requirements"]
-        == '(Arch == "X86_64") && (OpSys == "LINUX") && (has_avx == True)'
+        == '(Arch == "X86_64") && (OpSys == "LINUX") && (Microarch >= "x86_64-v3")'
     )
     assert last_submit_desc["transfer_executable"] == "False"
     # The schedd event log violates OSPool's home-dir policy for remote submit.
@@ -733,9 +734,9 @@ def test_submit_jobs_batch_one_cluster_many_procs(plugin_cfg, tmp_path, last_sub
         assert rec.proc_id == p
         assert rec.resource_id == f"OBJ{p}"
         assert rec.callback_url == f"http://cb/{p}"
-    # The submit carries per-proc macros + the AVX requirement.
+    # The submit carries per-proc macros + the microarch requirement.
     assert last_submit_desc["+SkyPortalResourceId"] == '"$(sp_rid)"'
-    assert "has_avx" in last_submit_desc["requirements"]
+    assert "Microarch" in last_submit_desc["requirements"]
 
 
 def test_batch_oracle_ships_all_staged_files(plugin_cfg, tmp_path, last_itemdata, monkeypatch):
