@@ -138,11 +138,14 @@ services:
                     osdf:
                         url_base: null   # osdf:// prefix handed to the worker, e.g. osdf:///umn-coughlin/alma
                         # The write credential is a Pelican keypair (secret.pem from
-                        # `pelican credentials token get write osdf://<ns>`), not a bearer
-                        # token: it mints short-lived tokens non-interactively (offline_access),
-                        # so it sits here as a static secret and the pod re-mints per upload
-                        # via the pelican client. keypair_path is preferred; write_token_path
-                        # is a fallback for a static bearer.
+                        # `pelican token fetch --modify osdf://<ns>`, which also grants
+                        # delete), not a bearer token: it mints short-lived tokens
+                        # non-interactively (offline_access) and the pod re-mints per
+                        # upload. Point this at a writable path that outlives the pod --
+                        # pelican rewrites the file in place when it refreshes, spending a
+                        # single-use refresh token, so a read-only mount breaks it at the
+                        # first refresh and two parallel copies invalidate each other.
+                        # keypair_path is preferred; write_token_path is a fallback.
                         keypair_path: null        # path to the Pelican keypair credential (secret.pem)
                         pelican_path: pelican     # pelican client used to mint the token from the keypair
                         write_token_path: null    # fallback: a static bearer SciToken file

@@ -122,8 +122,10 @@ def mint_token(
     """Mint a short-lived bearer token for the object's namespace from the Pelican
     keypair credential file (secret.pem), via the pelican client.
 
-    The keypair carries offline_access, so this re-mints with no browser; a pod can
-    hold secret.pem as a static secret and refresh indefinitely. Cached per
+    The keypair carries offline_access, so this re-mints with no browser. The file
+    is not static: pelican rewrites it in place when it refreshes, spending a
+    single-use refresh token, so keypair_path must name a writable copy that
+    outlives the process and no second copy may be used in parallel. Cached per
     namespace and re-minted within TOKEN_REFRESH_MARGIN_S of the token's own expiry,
     so a retry long after the first attempt gets a fresh token rather than a 403."""
     ns = _namespace(urlparse(object_url).path)
