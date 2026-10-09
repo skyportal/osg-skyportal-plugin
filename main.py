@@ -66,6 +66,11 @@ CONDOR_STATUS = {
 
 TERMINAL = {"completed", "removed"}
 
+# Callback POST retry on connection error / 5xx (a deploy briefly rolls the
+# SkyPortal webhook). Bounded so it never stalls the sequential poll loop for long.
+_CALLBACK_ATTEMPTS = 3
+_CALLBACK_BACKOFF_S = 1.0
+
 
 @dataclass
 class JobRecord:
@@ -507,6 +512,38 @@ def _stage_wrapper_job(
     return overrides, output_url, [u for u in transfer if str(u).startswith("osdf://")]
 
 
+# Fiesta/redback sources whose fit is a fast phenomenological model: a GPU doesn't
+# help and they fit in well under the default memory. Everything else on the fiesta
+# runtime (physics + surrogate sources, and the redback backend) is slow on CPU.
+_FIESTA_PHENOMENOLOGICAL = {"bazinmodel", "villarmodel", "phenomenologicaltdemodel"}
+
+# Physics/surrogate fits peak around 5-6 GB; the generic default holds them.
+_FIESTA_PHYSICS_MEMORY_MB = 6144
+
+
+def _fiesta_overrides(wrapper: str, params: dict, defaults: dict) -> dict:
+    """Default-overrides for a physics/surrogate fit on the fiesta runtime: a larger
+    memory floor (these peak ~5-6 GB and the 4 GB default holds them), and — only
+    when a CUDA image is configured (defaults.gpu_singularity_image) — a GPU plus
+    that image, since on CPU they run for hours and exceed the analysis timeout.
+    Returned as defaults, so an explicit per-request value still wins; {} for a
+    phenomenological source or a non-fiesta wrapper, leaving behaviour unchanged."""
+    if wrapper in WRAPPER_FILES:  # a named wrapper, not the fiesta/redback runtime
+        return {}
+    backend = str(params.get("backend", "fiesta")).strip().lower()
+    source = str(params.get("source", defaults.get("source", "")) or "").strip().lower()
+    if backend == "fiesta" and source in _FIESTA_PHENOMENOLOGICAL:
+        return {}
+    over: dict = {"request_memory": _FIESTA_PHYSICS_MEMORY_MB}
+    gpu_image = defaults.get("gpu_singularity_image")
+    # Pair the GPU image with the GPU request: only stamp the CUDA image when the
+    # job will actually use a GPU, so an explicit request_gpus=0 keeps the CPU image.
+    if gpu_image and int(params.get("request_gpus", 1) or 0) > 0:
+        over["request_gpus"] = 1
+        over["singularity_image"] = gpu_image
+    return over
+
+
 def _apply_gpu_and_image(submit_desc: dict, params: dict, defaults: dict) -> None:
     """Stamp the (optionally per-request) image and GPU resources onto a submit
     desc. request_gpus>0 routes the job to GPU glideins; a per-request
@@ -569,6 +606,9 @@ def submit_job(
     # Route the GW targeted searches (pygrb/aframe) to the IGWN AP so the job gets
     # a frames/gwdatafind scitoken; every other wrapper stays on the default AP.
     wrapper = str(params.get("wrapper", "")).strip().lower()
+    # Physics/surrogate fiesta fits get a bigger memory floor (and a GPU when a CUDA
+    # image is configured); explicit params still win via the params.get()s below.
+    defaults = {**defaults, **_fiesta_overrides(wrapper, params, defaults)}
     igwn = cfg.get("igwn") or {}
     igwn_ap = igwn if wrapper in (igwn.get("wrappers") or []) else None
     schedd = get_schedd(cfg, ap=igwn_ap)
@@ -668,8 +708,11 @@ def submit_job(
 
 def _submit_signature(cfg: dict, params: dict) -> tuple:
     """Submit-level knobs that must match for jobs to share one itemdata cluster
-    (resources/requirements live on the cluster ad, not per-proc)."""
-    d = cfg["defaults"]
+    (resources/requirements live on the cluster ad, not per-proc). The fiesta
+    physics/GPU overrides are folded in so a physics and a phenomenological fit
+    never share a cluster (they get different memory/GPU)."""
+    wrapper = str(params.get("wrapper", "")).strip().lower()
+    d = {**cfg["defaults"], **_fiesta_overrides(wrapper, params, cfg["defaults"])}
     return (
         str(params.get("request_cpus", d["request_cpus"])),
         str(params.get("request_memory", d["request_memory"])),
@@ -702,6 +745,7 @@ def submit_jobs_batch(cfg: dict, items: list[dict]) -> list[tuple[int, int]]:
     # which includes the image + wrapper, so one cluster is a single runtime).
     p0 = (items[0].get("inputs") or {}).get("analysis_parameters", {}) or {}
     wrapper = str(p0.get("wrapper", "")).strip().lower()
+    defaults = {**defaults, **_fiesta_overrides(wrapper, p0, defaults)}
     wrapper_name, wrapper_files = _wrapper_spec(wrapper, plugin_dir)
     transfer_files = ",".join(str(f) for f in wrapper_files)
     submit_desc: dict[str, str] = {
@@ -1164,16 +1208,28 @@ def _json_safe(obj: Any) -> Any:
 
 
 def post_callback(rec: JobRecord, cfg: dict | None = None) -> bool:
-    """POST the SkyPortal-shaped result to rec.callback_url. Return True on send."""
+    """POST the SkyPortal-shaped result to rec.callback_url. Return True on send.
+
+    Retries briefly on a connection error or 5xx: a deploy rolls the SkyPortal web
+    pod, so the webhook is unreachable or 502s for a few seconds while the new pod
+    comes up, and a once-only POST drops a completed fit's result (the poller would
+    only retry on its next sweep, which a mid-shutdown pod may not reach). The
+    backoff is bounded so it never stalls the sequential poll loop for long."""
     if not rec.callback_url or rec.callback_method.upper() != "POST":
         return False
     body = _json_safe(build_callback_body(rec, cfg))
-    try:
-        requests.post(rec.callback_url, json=body, timeout=30)
-        return True
-    except requests.RequestException as e:
-        log(f"callback post to {rec.callback_url} failed: {e!r}")
-        return False
+    for attempt in range(_CALLBACK_ATTEMPTS):
+        try:
+            r = requests.post(rec.callback_url, json=body, timeout=30)
+            if r.status_code < 500:  # 2xx/3xx/4xx are definitive; only 5xx is transient
+                return True
+            err = f"HTTP {r.status_code}"
+        except requests.RequestException as e:
+            err = repr(e)
+        if attempt + 1 < _CALLBACK_ATTEMPTS:
+            time.sleep(_CALLBACK_BACKOFF_S * (2**attempt))
+    log(f"callback post to {rec.callback_url} failed after {_CALLBACK_ATTEMPTS} tries: {err}")
+    return False
 
 
 def poll_once(cfg: dict) -> None:

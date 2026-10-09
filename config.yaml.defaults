@@ -56,6 +56,13 @@ services:
                     # supporting CUDA 13; older-driver nodes assign a GPU but fail
                     # CUDA init. "" disables. Clear this if GPU jobs stop matching.
                     require_gpus: "DriverVersion >= 13.0"
+                    # CUDA .sif (containers/fiesta-gpu.def). When set, physics and
+                    # surrogate fiesta/redback sources auto-route to a GPU with this
+                    # image (they are ~hours on CPU and blow the analysis timeout, but
+                    # seconds on a GPU); phenomenological sources stay on CPU. null =>
+                    # no auto-GPU (CPU default image), unchanged behaviour. A per-request
+                    # request_gpus/singularity_image still wins.
+                    gpu_singularity_image: null
                     # IGWN access-point knobs (all "" = plain OSPool submission).
                     # Set these to submit to an IGWN-credentialed AP (e.g. AP42)
                     # instead of ap41, so the AP mints + delivers an IGWN-scoped

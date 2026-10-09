@@ -62,6 +62,7 @@ def test_poll_posts_callback_with_skyportal_shape(
     fake_history.append({"ClusterId": cid, "JobStatus": 4, "CompletionDate": 1700000000})
 
     with patch("main.requests.post") as mock_post:
+        mock_post.return_value.status_code = 200
         main.poll_once(plugin_cfg)
         assert mock_post.called
         args, kwargs = mock_post.call_args
@@ -829,3 +830,161 @@ def test_alma_scratch_covers_the_archives_and_their_extraction():
 def test_an_explicit_request_wins_over_the_staged_size():
     params = {"request_disk": 4096, "max_runtime_seconds": 600}
     assert main.alma_job_sizing(8020 * MB, params, ALMA_DEFAULTS) == {}
+
+
+# ---- fiesta physics/surrogate resource + auto-GPU defaults ----------------------------------
+
+
+def test_fiesta_physics_source_gets_memory_floor(plugin_cfg, last_submit_desc):
+    # Unspecified source defaults to the physics surrogate (Bu2025_MLP); it peaks
+    # ~5-6 GB, so the memory floor is raised. No CUDA image configured -> stays CPU.
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={},
+    )
+    assert last_submit_desc["request_memory"] == "6144MB"
+    assert "request_gpus" not in last_submit_desc
+
+
+def test_fiesta_phenomenological_source_unchanged(plugin_cfg, last_submit_desc):
+    # Bazin is fast and small on CPU: keeps the generic memory default, no GPU.
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={"analysis_parameters": {"source": "BazinModel"}},
+    )
+    assert last_submit_desc["request_memory"] == "256MB"
+    assert "request_gpus" not in last_submit_desc
+
+
+def test_fiesta_physics_autoroutes_to_gpu_when_image_configured(plugin_cfg, last_submit_desc):
+    import copy
+
+    cfg = copy.deepcopy(plugin_cfg)
+    cfg["defaults"]["gpu_singularity_image"] = "osdf:///x/fiesta-gpu.sif"
+    main.submit_job(
+        cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={"analysis_parameters": {"source": "ArnettModel"}},
+    )
+    assert last_submit_desc["request_gpus"] == "1"
+    assert last_submit_desc["+SingularityImage"] == '"osdf:///x/fiesta-gpu.sif"'
+    assert last_submit_desc["request_memory"] == "6144MB"
+
+
+def test_explicit_request_gpus_zero_keeps_cpu_image(plugin_cfg, last_submit_desc):
+    # Forcing CPU on a physics source must not leave the CUDA image stamped.
+    import copy
+
+    cfg = copy.deepcopy(plugin_cfg)
+    cfg["defaults"]["gpu_singularity_image"] = "osdf:///x/fiesta-gpu.sif"
+    cfg["defaults"]["singularity_image"] = "osdf:///x/fiesta-cpu.sif"
+    main.submit_job(
+        cfg,
+        analysis_name="fiesta_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={"analysis_parameters": {"source": "ArnettModel", "request_gpus": 0}},
+    )
+    assert "request_gpus" not in last_submit_desc
+    assert last_submit_desc["+SingularityImage"] == '"osdf:///x/fiesta-cpu.sif"'
+
+
+def test_named_wrapper_not_affected_by_fiesta_overrides(plugin_cfg, last_submit_desc):
+    # oracle is a named wrapper, not the fiesta runtime: no memory/GPU override.
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="oracle_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={"analysis_parameters": {"wrapper": "oracle"}},
+    )
+    assert last_submit_desc["request_memory"] == "256MB"
+
+
+def test_submit_signature_separates_physics_from_phenomenological(plugin_cfg):
+    phys = main._submit_signature(plugin_cfg, {})  # unspecified -> physics
+    phen = main._submit_signature(plugin_cfg, {"source": "VillarModel"})
+    assert phys != phen
+
+
+# ---- callback retry on transient 5xx / connection error -------------------------------------
+
+
+def _rec():
+    return main.JobRecord(
+        cluster_id=1,
+        analysis_name="x",
+        resource_id="z",
+        callback_url="http://sp/cb",
+        callback_method="POST",
+        status="completed",
+    )
+
+
+def test_post_callback_retries_5xx_then_succeeds(monkeypatch):
+    monkeypatch.setattr(main, "build_callback_body", lambda rec, cfg=None: {"status": "success"})
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    codes = [502, 503, 200]
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(url)
+        from unittest.mock import MagicMock
+
+        r = MagicMock()
+        r.status_code = codes[len(calls) - 1]
+        return r
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    assert main.post_callback(_rec()) is True
+    assert len(calls) == 3  # two 5xx retries, then the 200
+
+
+def test_post_callback_gives_up_after_max_on_persistent_5xx(monkeypatch):
+    monkeypatch.setattr(main, "build_callback_body", lambda rec, cfg=None: {"status": "success"})
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(url)
+        from unittest.mock import MagicMock
+
+        r = MagicMock()
+        r.status_code = 500
+        return r
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    assert main.post_callback(_rec()) is False
+    assert len(calls) == main._CALLBACK_ATTEMPTS
+
+
+def test_post_callback_does_not_retry_4xx(monkeypatch):
+    # A 4xx (e.g. the analysis already timed out) is definitive: send once, no retry.
+    monkeypatch.setattr(main, "build_callback_body", lambda rec, cfg=None: {"status": "success"})
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(url)
+        from unittest.mock import MagicMock
+
+        r = MagicMock()
+        r.status_code = 400
+        return r
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    assert main.post_callback(_rec()) is True
+    assert len(calls) == 1
