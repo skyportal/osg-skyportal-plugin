@@ -102,9 +102,28 @@ def _photometry_rows(payload: dict) -> tuple[list, list, dict]:
                 return -2.5 * np.log10(NSIGMA * fe) + PHOT_ZP
         return None
 
+    def _snr(row) -> float | None:
+        """Detection significance: flux/fluxerr when present, else from magerr
+        (SNR ~= 1.0857/magerr). None if neither is usable."""
+        if (
+            "flux" in cols
+            and "fluxerr" in cols
+            and not (np.ma.is_masked(row["flux"]) or np.ma.is_masked(row["fluxerr"]))
+        ):
+            fl, fe = float(row["flux"]), float(row["fluxerr"])
+            if np.isfinite(fl) and np.isfinite(fe) and fe > 0:
+                return fl / fe
+        if not np.ma.is_masked(row["magerr"]):
+            me = float(row["magerr"])
+            if np.isfinite(me) and me > 0:
+                return 1.0857362 / me
+        return None
+
     dets: list = []
     nondets: list = []
     band_map: dict = {}
+    # Forced photometry writes a mag for sub-threshold noise too, so a detection
+    # needs SNR >= NSIGMA; sub-threshold points become upper limits, not detections.
     for row in table:
         filt, mjd = str(row["filter"]), float(row["mjd"])
         band, inst, syst = _band_tags(filt)
@@ -115,7 +134,8 @@ def _photometry_rows(payload: dict) -> tuple[list, list, dict]:
                 magf, errf = float(mag), float(magerr)
             except (TypeError, ValueError):
                 magf = errf = float("nan")
-            if np.isfinite(magf) and np.isfinite(errf):
+            snr = _snr(row)
+            if np.isfinite(magf) and np.isfinite(errf) and snr is not None and snr >= NSIGMA:
                 dets.append((mjd, filt, band, inst, syst, magf, errf))
                 continue
         lim = _limit_mag(row)

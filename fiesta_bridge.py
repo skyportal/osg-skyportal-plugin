@@ -85,8 +85,26 @@ def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str
                 return -2.5 * np.log10(NSIGMA * fe) + PHOT_ZP
         return None
 
-    # SkyPortal sends non-detections with a masked mag; split them out so we can
-    # keep only the informative upper limits below.
+    def _snr(row) -> float | None:
+        """Detection significance: flux/fluxerr when present, else from magerr
+        (SNR ~= 1.0857/magerr). None if neither is usable."""
+        if (
+            "flux" in cols
+            and "fluxerr" in cols
+            and not (np.ma.is_masked(row["flux"]) or np.ma.is_masked(row["fluxerr"]))
+        ):
+            fl, fe = float(row["flux"]), float(row["fluxerr"])
+            if np.isfinite(fl) and np.isfinite(fe) and fe > 0:
+                return fl / fe
+        if not np.ma.is_masked(row["magerr"]):
+            me = float(row["magerr"])
+            if np.isfinite(me) and me > 0:
+                return 1.0857362 / me
+        return None
+
+    # A row has a finite mag whenever it is measured, but forced photometry writes
+    # one for sub-threshold noise too — so a detection also needs SNR >= NSIGMA.
+    # Sub-threshold points fall through to become upper limits, not detections.
     dets: list[tuple[float, str, float, float]] = []
     nondets: list[tuple[float, str, float]] = []
     for row in table:
@@ -97,7 +115,8 @@ def _write_data_file(payload: dict, outdir: Path) -> tuple[Path, float, list[str
                 magf, errf = float(mag), float(magerr)
             except (TypeError, ValueError):
                 magf = errf = float("nan")
-            if np.isfinite(magf) and np.isfinite(errf):
+            snr = _snr(row)
+            if np.isfinite(magf) and np.isfinite(errf) and snr is not None and snr >= NSIGMA:
                 dets.append((mjd, filt, magf, errf))
                 continue
         lim = _limit_mag(row)

@@ -176,6 +176,25 @@ def _parse_photometry(payload: dict) -> tuple[list, list, list, list, int, float
     from astropy.table import Table
 
     table = Table.read(payload["photometry"], format="ascii.csv")
+    cols = table.colnames
+    NSIGMA = 5.0
+
+    def _snr(row) -> float | None:
+        """flux/fluxerr when present, else from magerr (SNR ~= 1.0857/magerr)."""
+        if (
+            "flux" in cols
+            and "fluxerr" in cols
+            and not (np.ma.is_masked(row["flux"]) or np.ma.is_masked(row["fluxerr"]))
+        ):
+            fl, fe = float(row["flux"]), float(row["fluxerr"])
+            if np.isfinite(fl) and np.isfinite(fe) and fe > 0:
+                return fl / fe
+        if not np.ma.is_masked(row["magerr"]):
+            me = float(row["magerr"])
+            if np.isfinite(me) and me > 0:
+                return 1.0857362 / me
+        return None
+
     times, mags, errs, bands = [], [], [], []
     for row in table:
         mag, magerr = row["mag"], row["magerr"]
@@ -186,6 +205,11 @@ def _parse_photometry(payload: dict) -> tuple[list, list, list, list, int, float
         except (TypeError, ValueError):
             continue
         if not (np.isfinite(magf) and np.isfinite(errf)):
+            continue
+        # Forced photometry writes a mag for sub-threshold noise; fit detections
+        # only (this parser emits no upper limits), so require SNR >= NSIGMA.
+        snr = _snr(row)
+        if snr is None or snr < NSIGMA:
             continue
         b = _band(str(row["filter"]))
         if b not in _SUPPORTED:  # no bandpass for this filter -> skip

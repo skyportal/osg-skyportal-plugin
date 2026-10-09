@@ -48,3 +48,21 @@ def test_registry_entry_is_well_formed(model):
     for p in reg["fit_params"]:
         lo, hi = reg["priors"][p]
         assert lo < hi
+
+
+def test_subthreshold_forced_photometry_is_not_a_detection(tmp_path):
+    """redback fits detections only, so a sub-5-sigma fp point (still has a mag)
+    must be skipped; the high-SNR point is kept."""
+    import pytest
+
+    pytest.importorskip("astropy")
+    csv = tmp_path / "phot.csv"
+    csv.write_text(
+        "mjd,filter,mag,magerr,flux,fluxerr,limiting_mag\n"
+        "100.0,ztfg,19.0,0.05,1000,50,20.5\n"  # SNR 20 -> detection
+        "101.0,ztfg,21.0,0.5,100,50,21.5\n"  # SNR 2  -> skipped
+    )
+    times, mags, errs, bands, n_det, _min = redback_bridge._parse_photometry(
+        {"photometry": str(csv)}
+    )
+    assert n_det == 1 and len(times) == 1

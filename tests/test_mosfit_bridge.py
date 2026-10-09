@@ -60,3 +60,20 @@ def test_select_upper_limits_keeps_last_pre_and_window_only():
     kept_times = sorted(k[0] for k in kept)
     assert kept_times == [104.0, 110.0]
     assert all(k[2] == "r" for k in kept)  # only the detected band survives
+
+
+def test_subthreshold_forced_photometry_is_not_a_detection(tmp_path):
+    """A sub-5-sigma fp point carries a mag but must parse as an upper limit, not
+    a detection (SNR >= 5 cut); a high-SNR point stays a detection."""
+    import pytest
+
+    pytest.importorskip("astropy")
+    csv = tmp_path / "phot.csv"
+    csv.write_text(
+        "mjd,filter,mag,magerr,flux,fluxerr,limiting_mag\n"
+        "100.0,ztfg,19.0,0.05,1000,50,20.5\n"  # SNR 20 -> detection
+        "100.0,ztfg,21.0,0.5,100,50,21.5\n"  # SNR 2  -> upper limit
+    )
+    dets, nondets, _band_map = mosfit_bridge._photometry_rows({"photometry": str(csv)})
+    assert len(dets) == 1
+    assert len(nondets) == 1
