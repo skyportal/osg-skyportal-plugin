@@ -147,6 +147,11 @@ services:
                         # first refresh and two parallel copies invalidate each other.
                         # keypair_path is preferred; write_token_path is a fallback.
                         keypair_path: null        # path to the Pelican keypair credential (secret.pem)
+                        # Staged products are removed when the job reaches a
+                        # terminal state; nothing else ever deletes them and
+                        # they are the ones too big to spool. Deleting clears
+                        # the origin, not caches the object reached.
+                        delete_after_job: true
                         pelican_path: pelican     # pelican client used to mint the token from the keypair
                         write_token_path: null    # fallback: a static bearer SciToken file
                         max_concurrent: 2   # cap on simultaneous streaming transfers, off the shared submit pool

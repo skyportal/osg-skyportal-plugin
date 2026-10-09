@@ -84,6 +84,9 @@ class JobRecord:
     hold_reason: str | None = None
     callback_posted: bool = False
     osdf_output_url: str | None = None
+    # Products staged to OSDF for this job's inputs, removed once it is over.
+    osdf_staged: list[str] = field(default_factory=list)
+    osdf_cleanup_attempts: int = 0
     spooled: bool = False
     inputs: dict[str, Any] = field(default_factory=dict)
     # The AP this job was submitted to (IGWN AP for GW searches); None = default
@@ -332,8 +335,9 @@ def alma_job_sizing(staged_bytes: int, params: dict, defaults: dict) -> dict:
 
 def _stage_wrapper_job(
     cfg: dict, params: dict, inputs: dict, cluster_uuid: str
-) -> tuple[dict, str | None]:
-    """Build submit overrides + an OSDF output URL when wrapper-mode is requested."""
+) -> tuple[dict, str | None, list[str]]:
+    """Build submit overrides, an OSDF output URL when wrapper-mode is requested,
+    and the OSDF objects staged as inputs, which the job's end removes."""
     # Wrapper mode can be forced per-service via config (an NMMA service always
     # wraps), named explicitly with the `wrapper` param, or requested per-job
     # via `use_wrapper`. A named wrapper implies wrapper mode.
@@ -352,7 +356,7 @@ def _stage_wrapper_job(
         "fleet",
     ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
-        return {}, None
+        return {}, None, []
 
     # aframe with transfer_urls lands each model file under its OSDF URL basename;
     # tell the bridge/buoy those names (the config differs per model, e.g.
@@ -500,7 +504,7 @@ def _stage_wrapper_job(
         overrides["+SingularityImage"] = f'"{WRAPPER_DEFAULT_IMAGE[wrapper]}"'
     if alma_staged_bytes:
         overrides.update(alma_job_sizing(alma_staged_bytes, params, cfg.get("defaults") or {}))
-    return overrides, output_url
+    return overrides, output_url, [u for u in transfer if str(u).startswith("osdf://")]
 
 
 def _apply_gpu_and_image(submit_desc: dict, params: dict, defaults: dict) -> None:
@@ -570,7 +574,9 @@ def submit_job(
     schedd = get_schedd(cfg, ap=igwn_ap)
 
     cluster_uuid = uuid.uuid4().hex
-    wrapper_overrides, osdf_output_url = _stage_wrapper_job(cfg, params, inputs, cluster_uuid)
+    wrapper_overrides, osdf_output_url, osdf_staged = _stage_wrapper_job(
+        cfg, params, inputs, cluster_uuid
+    )
 
     # Per-wrapper resource floors (GW searches need more disk/memory/runtime).
     res = {**defaults, **WRAPPER_DEFAULT_RESOURCES.get(wrapper, {})}
@@ -622,6 +628,10 @@ def submit_job(
     submit_desc["+SkyPortalResourceId"] = f'"{resource_id}"' if resource_id else '""'
     if osdf_output_url:
         submit_desc["+SkyPortalOsdfOutput"] = f'"{osdf_output_url}"'
+    # Round-tripped so a restart still knows what to clean up. URLs have no
+    # spaces, so one string holds the list.
+    if osdf_staged:
+        submit_desc["+SkyPortalOsdfStaged"] = '"' + " ".join(osdf_staged) + '"'
 
     # Remote AP submission must spool: otherwise Iwd defaults to this host's cwd
     # (nonexistent on the AP → held) and input files never reach the sandbox.
@@ -647,6 +657,7 @@ def submit_job(
         callback_url=callback_url,
         callback_method=callback_method,
         osdf_output_url=osdf_output_url,
+        osdf_staged=osdf_staged,
         spooled=needs_spool,
         inputs=inputs,
         ap=igwn_ap,
@@ -941,6 +952,7 @@ _SP_AD_PROJECTION = [
     "SkyPortalCallbackMethod",
     "SkyPortalResourceId",
     "SkyPortalOsdfOutput",
+    "SkyPortalOsdfStaged",
 ]
 
 
@@ -959,6 +971,7 @@ def _adopt_ad(ad: dict, from_history: bool = False) -> None:
         callback_method=ad.get("SkyPortalCallbackMethod") or "POST",
         submitted_at=float(ad.get("QDate", time.time())),
         osdf_output_url=ad.get("SkyPortalOsdfOutput") or None,
+        osdf_staged=(ad.get("SkyPortalOsdfStaged") or "").split(),
     )
     if from_history:
         rec.status = CONDOR_STATUS.get(int(ad["JobStatus"]), "completed")
@@ -967,6 +980,49 @@ def _adopt_ad(ad: dict, from_history: bool = False) -> None:
         rec.status = CONDOR_STATUS.get(int(ad["JobStatus"]), "idle")
         rec.hold_reason = ad.get("HoldReason")
     JOBS[_key(rec)] = rec
+
+
+# A delete that keeps failing is a real fault, not a blip; stop retrying it
+# every poll and leave the objects for a human.
+OSDF_CLEANUP_MAX_ATTEMPTS = 3
+
+
+def _cleanup_osdf_inputs(rec: JobRecord, cfg: dict) -> bool:
+    """Remove the products staged to OSDF for a job that is over.
+
+    Nothing else does: the spooled copies are cleared at submit, but an OSDF
+    item never touches pod disk, and these are the products too big to spool --
+    gigabytes each. Only terminal jobs reach here, so the worker has had them.
+    """
+    import osdf
+
+    if not rec.osdf_staged:
+        return True
+    osdf_alma = (cfg.get("alma") or {}).get("osdf") or {}
+    if not osdf_alma.get("delete_after_job", True):
+        return True
+    keypair = osdf_alma.get("keypair_path")
+    if not keypair:
+        # Uploads needed the keypair, so there is nothing to clean without one.
+        return True
+    pelican_bin = osdf_alma.get("pelican_path", "pelican")
+    rec.osdf_cleanup_attempts += 1
+    remaining = []
+    for url in rec.osdf_staged:
+        try:
+            osdf.delete_object(url, keypair_path=keypair, pelican_bin=pelican_bin)
+            log(f"removed staged OSDF input {url} for cluster {rec.cluster_id}")
+        except Exception as e:  # noqa: BLE001 -- a failed delete must not stop the rest
+            log(f"could not remove staged OSDF input {url}: {e}")
+            remaining.append(url)
+    rec.osdf_staged = remaining
+    if remaining and rec.osdf_cleanup_attempts >= OSDF_CLEANUP_MAX_ATTEMPTS:
+        log(
+            f"giving up removing {len(remaining)} staged OSDF input(s) for cluster "
+            f"{rec.cluster_id} after {rec.osdf_cleanup_attempts} attempts: {remaining}"
+        )
+        return True
+    return not remaining
 
 
 def rehydrate_jobs(cfg: dict, history_hours: float = 24.0) -> int:
@@ -1194,6 +1250,10 @@ def _poll_group(cfg: dict, schedd, open_keys: list) -> None:
                 _retrieve_outputs(schedd, rec)
                 _merge_jax_cache(cfg)
             rec.callback_posted = post_callback(rec, cfg)
+        # Independent of the callback: the results are the user's, the staged
+        # gigabytes are ours, and neither should wait on the other.
+        if rec.status in TERMINAL and rec.osdf_staged:
+            _cleanup_osdf_inputs(rec, cfg)
 
 
 async def poller_loop(cfg: dict):

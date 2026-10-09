@@ -153,6 +153,40 @@ def mint_token(
     return token
 
 
+def delete_object(
+    object_url: str,
+    keypair_path: str,
+    pelican_bin: str = "pelican",
+    timeout: int = 300,
+) -> None:
+    """Remove one staged object, via the pelican client.
+
+    Not an HTTPS DELETE like the upload's PUT: deleting needs a modify-scoped
+    token and `credentials token get` only issues read or write, so the client
+    is the only thing that can mint one from the keypair. One object at a time,
+    too -- asked for a collection the client wants a token it cannot mint
+    without a terminal, and fails.
+
+    Deleting clears the origin but not any cache the object reached, which is
+    the client's own caveat, so this reclaims the origin's space rather than
+    guaranteeing the bytes are gone everywhere.
+    """
+    env = {**os.environ, "PELICAN_CLIENT_CREDENTIALFILE": os.path.expanduser(keypair_path)}
+    proc = subprocess.run(
+        [pelican_bin, "object", "delete", object_url],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"pelican object delete failed for {object_url} "
+            f"(exit {proc.returncode}): {proc.stderr[-300:]}"
+        )
+
+
 def upload_stream(
     object_url: str,
     source,

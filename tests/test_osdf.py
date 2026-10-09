@@ -216,3 +216,27 @@ def test_upload_stream_mints_from_keypair_and_puts_with_it(monkeypatch):
     # the real PUT (not the .probe resolve) carries the minted token
     put = [c for c in mput.call_args_list if not c.args[0].endswith("/.probe")][0]
     assert put.kwargs["headers"]["Authorization"] == f"Bearer {tok}"
+
+
+def test_delete_object_uses_the_keypair(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kw: calls.append((cmd, kw)) or MagicMock(returncode=0, stdout="", stderr=""),
+    )
+    osdf.delete_object("osdf:///umn-coughlin/alma/c1/x.tar", "/x/s.pem", pelican_bin="pel")
+    cmd, kw = calls[0]
+    assert cmd == ["pel", "object", "delete", "osdf:///umn-coughlin/alma/c1/x.tar"]
+    assert kw["env"]["PELICAN_CLIENT_CREDENTIALFILE"] == "/x/s.pem"
+    # A terminal is not available to the service, so the client must never wait
+    # on one for input.
+    assert kw["stdin"] is not None
+
+
+def test_delete_object_raises_on_failure(monkeypatch):
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kw: MagicMock(returncode=1, stdout="", stderr="no token"),
+    )
+    with pytest.raises(RuntimeError, match="no token"):
+        osdf.delete_object("osdf:///ns/a.tar", "/x/s.pem")
