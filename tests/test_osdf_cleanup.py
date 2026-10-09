@@ -1,6 +1,5 @@
 """Staged OSDF products are removed once the job that needed them is over."""
 
-
 import pytest
 
 import main
