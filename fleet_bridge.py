@@ -224,25 +224,25 @@ def write_catalog(name: str, work_dir: str) -> Path:
 
 
 def _extract_probabilities(info_table) -> dict:
-    """Pull the per-class probabilities from FLEET's returned info table. FLEET
-    names them variously (e.g. P_<class>, P_late_<class>); match the known class
-    set against the columns, suffix-first."""
+    """Per-class probabilities from FLEET's main 10-class classifier. FLEET names
+    these ``P_late_<class>`` and reports them as percentages (0-100), so rescale to
+    fractions. The ``P_rapid_slsn_*`` / ``P_rapid_tde_*`` columns are the
+    specialised early-time detectors and are not the general verdict."""
     try:
-        columns = list(info_table.colnames)
+        columns = set(info_table.colnames)
     except AttributeError:
-        columns = list(getattr(info_table, "columns", []))
+        columns = set(getattr(info_table, "columns", []))
     probs = {}
     for cls in FLEET_CLASSES:
-        for col in columns:
-            if col == cls or col.endswith(f"_{cls}") or col.endswith(cls):
-                try:
-                    val = info_table[col][0]
-                except Exception:  # noqa: BLE001
-                    continue
-                v = _to_float(val)
-                if v is not None:
-                    probs[cls] = round(v, 4)
-                    break
+        col = f"P_late_{cls}"
+        if col not in columns:
+            continue
+        try:
+            v = _to_float(info_table[col][0])
+        except Exception:  # noqa: BLE001
+            continue
+        if v is not None:
+            probs[cls] = round(v / 100.0, 4)
     return probs
 
 

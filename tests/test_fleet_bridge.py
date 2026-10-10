@@ -115,15 +115,21 @@ def test_write_catalog_without_host_is_header_only(tmp_path):
     assert path.exists() and len(path.read_text().splitlines()) == 1
 
 
-def test_extract_probabilities_matches_class_columns():
+def test_extract_probabilities_uses_p_late_and_rescales_percent():
+    # FLEET reports P_late_<class> as percentages; the rapid columns must be ignored.
     class _T:
-        colnames = ["name", "P_late_SNIa", "P_late_TDE", "P_late_SLSNI"]
+        colnames = ["name", "P_late_SNIa", "P_late_TDE", "P_late_SLSNI", "P_rapid_slsn_SLSNI"]
 
         def __getitem__(self, k):
-            return {"P_late_SNIa": [0.7], "P_late_TDE": [0.2], "P_late_SLSNI": [0.1]}[k]
+            return {
+                "P_late_SNIa": [70.0],
+                "P_late_TDE": [20.0],
+                "P_late_SLSNI": [10.0],
+                "P_rapid_slsn_SLSNI": [95.0],
+            }[k]
 
     probs = fleet_bridge._extract_probabilities(_T())
-    assert probs["SNIa"] == 0.7 and probs["TDE"] == 0.2 and probs["SLSNI"] == 0.1
+    assert probs == {"SNIa": 0.7, "TDE": 0.2, "SLSNI": 0.1}
 
 
 def test_taxonomy_map_covers_fleet_classes():
