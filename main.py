@@ -1144,6 +1144,15 @@ def collect_outputs(rec: JobRecord) -> dict[str, Any]:
     return payload
 
 
+def _remove_job_outputs(rec: JobRecord) -> None:
+    for name in (
+        f"job.{rec.cluster_id}.{rec.proc_id}.out",
+        f"job.{rec.cluster_id}.{rec.proc_id}.err",
+        f"logs/bundle.{rec.cluster_id}.{rec.proc_id}.json",
+    ):
+        Path(name).unlink(missing_ok=True)
+
+
 def fetch_osdf_bundle(rec: JobRecord, cfg: dict) -> dict | None:
     """Pull the wrapper's pre-built SkyPortal bundle from OSDF if it exists."""
     if not rec.osdf_output_url:
@@ -1306,6 +1315,8 @@ def _poll_group(cfg: dict, schedd, open_keys: list) -> None:
                 _retrieve_outputs(schedd, rec)
                 _merge_jax_cache(cfg)
             rec.callback_posted = post_callback(rec, cfg)
+            if rec.callback_posted:
+                _remove_job_outputs(rec)
         # Independent of the callback: the results are the user's, the staged
         # gigabytes are ours, and neither should wait on the other.
         if rec.status in TERMINAL and rec.osdf_staged:
