@@ -672,6 +672,29 @@ def test_wrapper_mode_via_config_default(plugin_cfg, last_submit_desc, tmp_path,
     assert "initialdir" not in last_submit_desc  # spool owns the sandbox
 
 
+def test_rehydrate_skips_other_instances_jobs(plugin_cfg, fake_queue, fake_history, monkeypatch):
+    monkeypatch.setitem(plugin_cfg, "instance_url", "https://orcus.example")
+
+    def ad(cid, callback):
+        return {
+            "ClusterId": cid,
+            "JobStatus": 4,
+            "QDate": 1700000000,
+            "CompletionDate": 1700000100,
+            "ProjectName": "Test",
+            "SkyPortalAnalysisName": "fiesta_osg",
+            "SkyPortalCallback": callback,
+            "SkyPortalCallbackMethod": "POST",
+            "SkyPortalResourceId": "ZTF99",
+        }
+
+    fake_queue.append(ad(1, "https://orcus.example/api/webhook/obj_analysis/a"))
+    fake_queue.append(ad(2, "https://fritz.example/api/webhook/obj_analysis/b"))
+    fake_history.append(ad(3, "https://orcus.example.evil/api/webhook/obj_analysis/c"))
+    assert main.rehydrate_jobs(plugin_cfg) == 1
+    assert list(main.JOBS) == [(1, 0)]
+
+
 def test_rehydrate_is_idempotent(plugin_cfg, fake_queue):
     fake_queue.append(
         {

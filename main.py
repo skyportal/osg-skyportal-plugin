@@ -1069,6 +1069,14 @@ def _cleanup_osdf_inputs(rec: JobRecord, cfg: dict) -> bool:
     return not remaining
 
 
+def _is_own_job(ad: dict, cfg: dict) -> bool:
+    """Instances sharing an OSG project see each other's jobs; keep those calling back here."""
+    instance_url = cfg.get("instance_url")
+    if not instance_url:
+        return True
+    return (ad.get("SkyPortalCallback") or "").startswith(instance_url.rstrip("/") + "/")
+
+
 def rehydrate_jobs(cfg: dict, history_hours: float = 24.0) -> int:
     """Repopulate `JOBS` from the schedd on startup. Returns count adopted."""
     schedd = get_schedd(cfg)
@@ -1076,7 +1084,8 @@ def rehydrate_jobs(cfg: dict, history_hours: float = 24.0) -> int:
     constraint = f'ProjectName == "{project}" && SkyPortalCallback isnt ""'
     before = len(JOBS)
     for ad in schedd.query(constraint=constraint, projection=_SP_AD_PROJECTION):
-        _adopt_ad(ad)
+        if _is_own_job(ad, cfg):
+            _adopt_ad(ad)
     cutoff = time.time() - history_hours * 3600
     history_constraint = f"{constraint} && CompletionDate > {cutoff:.0f}"
     try:
@@ -1085,7 +1094,8 @@ def rehydrate_jobs(cfg: dict, history_hours: float = 24.0) -> int:
             projection=_SP_AD_PROJECTION,
             match=1000,
         ):
-            _adopt_ad(ad, from_history=True)
+            if _is_own_job(ad, cfg):
+                _adopt_ad(ad, from_history=True)
     except Exception as e:  # noqa: BLE001 — history is best-effort
         log(f"rehydrate: history sweep failed: {e!r}")
     adopted = len(JOBS) - before
@@ -1528,8 +1538,12 @@ def build_app(cfg: dict) -> tornado.web.Application:
 
 
 def load_plugin_config() -> dict:
+    from skyportal.utils.app import get_app_base_url
+
     _, app_cfg = load_env()
-    return app_cfg["services.external.osg.params"]
+    cfg = app_cfg["services.external.osg.params"]
+    cfg.setdefault("instance_url", get_app_base_url())
+    return cfg
 
 
 async def amain():
