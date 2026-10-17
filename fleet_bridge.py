@@ -216,11 +216,16 @@ def _select_host_row(host: dict, lsdr10: list) -> dict | None:
     None to leave the caller on the all-crossmatch/Pcc path."""
     hg = host.get("host_galaxy") or {}
     bh = hg.get("best_host") if isinstance(hg, dict) else None
+    phot = (bh or {}).get("photometry") or {}
     if bh and str(bh.get("catalog") or "").upper() == "LSDR10":
         name = str(bh.get("objname") or "")
-        for r in lsdr10:
-            if name and _row_id(r) == name:
-                return r
+    elif str(phot.get("catalog") or "").upper() == "LSDR10":
+        name = str(phot.get("source_id") or "")
+    else:
+        name = ""
+    for r in lsdr10:
+        if name and _row_id(r) == name:
+            return r
     cands = []
     for r in lsdr10:
         if str(r.get("objtype") or "").strip().upper() == "DUP":
@@ -239,11 +244,26 @@ def _row_to_catalog(row: dict) -> dict | None:
     """One LSDR10 row -> a FLEET SDSS-style catalogue record (None if no usable
     photometry). object_nature=1.0 / type_sdss=3 declare it a galaxy, overriding a
     PSF mistyping of a nuclear host."""
-    ra = _to_float(row.get("ra"))
-    dec = _to_float(row.get("dec"))
+    mags = {b: _nanomaggy_to_ab(row.get(f"flux_{b}")) for b in ("g", "r", "i", "z")}
+    return _catalog_record(row.get("ra"), row.get("dec"), mags, _to_float(row.get("shape_r")))
+
+
+def _photometry_to_catalog(best_host: dict) -> dict | None:
+    """BOOM's ``best_host.photometry`` (Pan-STARRS when the host is outside Legacy)
+    -> a FLEET catalogue record at the host's position."""
+    phot = best_host.get("photometry") or {}
+    mags = {b: _to_float(phot.get(f"mag_{b}")) for b in ("g", "r", "i", "z")}
+    a = _to_float(best_host.get("a_arcsec"))
+    # an isophotal semi-major axis is about twice the half-light radius FLEET expects
+    radius = a / 2 if a and best_host.get("size_is_isophotal") else a
+    return _catalog_record(best_host.get("ra"), best_host.get("dec"), mags, radius)
+
+
+def _catalog_record(ra, dec, mags: dict, radius: float | None) -> dict | None:
+    ra = _to_float(ra)
+    dec = _to_float(dec)
     if ra is None or dec is None:
         return None
-    mags = {b: _nanomaggy_to_ab(row.get(f"flux_{b}")) for b in ("g", "r", "i", "z")}
     if mags["g"] is None and mags["r"] is None:
         return None  # no usable host photometry
     # Fill every missing band (including u, which LSDR10 lacks) from the nearest
@@ -256,8 +276,7 @@ def _row_to_catalog(row: dict) -> dict | None:
         if mags.get(b) is None:
             nearest = min(present, key=lambda p: abs(order.index(p) - order.index(b)))
             mags[b] = present[nearest]
-    shape_r = _to_float(row.get("shape_r"))
-    rad = shape_r if shape_r and shape_r > 0 else 0.7  # FLEET's default_radius floor
+    rad = radius if radius and radius > 0 else 0.7  # FLEET's default_radius floor
     rec = {"ra_matched": ra, "dec_matched": dec, "type_sdss": 3, "object_nature": 1.0}
     for b in _CAT_BANDS:
         rec[f"psfMag_{b}_sdss"] = mags[b]
@@ -273,6 +292,12 @@ def _host_rows(host: dict) -> list[dict]:
     (which drops nuclear TDE hosts). Otherwise falls back to every non-stellar
     crossmatch and lets FLEET choose."""
     lsdr10 = host.get("LSDR10") or host.get("cross_matches", {}).get("LSDR10") or []
+    hg = host.get("host_galaxy") or {}
+    bh = (hg.get("best_host") if isinstance(hg, dict) else None) or {}
+    phot = bh.get("photometry") or {}
+    if phot and str(phot.get("catalog") or "").upper() != "LSDR10":
+        rec = _photometry_to_catalog(bh)
+        return [rec] if rec is not None else []
     selected = _select_host_row(host, lsdr10)
     if selected is not None:
         rec = _row_to_catalog(selected)

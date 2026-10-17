@@ -203,6 +203,24 @@ def test_select_host_uses_dlr_best_host_by_id():
     assert sel["_id"] == 111  # the DLR-chosen id, not merely the nearest by distance
 
 
+def test_host_rows_uses_best_host_ps1_photometry_outside_legacy():
+    best_host = {
+        "objname": "WISEA J173303.02-034534.0",
+        "catalog": "NED",
+        "ra": 263.2626,
+        "dec": -3.7594,
+        "a_arcsec": 29.15,
+        "size_is_isophotal": True,
+        "photometry": {"catalog": "PS1_DR2", "mag_g": 18.2, "mag_r": 17.6, "mag_i": None},
+    }
+    hr = fleet_bridge._host_rows({"LSDR10": [], "host_galaxy": {"best_host": best_host}})
+    assert len(hr) == 1
+    assert hr[0]["ra_matched"] == 263.2626
+    assert hr[0]["modelMag_r_sdss"] == 17.6
+    assert hr[0]["modelMag_i_sdss"] == 17.6  # filled from the nearest band, not 99
+    assert hr[0]["petroR50_r_sdss"] == 29.15 / 2
+
+
 def test_host_rows_recovers_psf_nucleus_when_best_host_null():
     # TDE: BOOM dropped the PSF-typed nucleus so best_host is null; take the nearest.
     rows = [
