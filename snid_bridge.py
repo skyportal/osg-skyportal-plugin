@@ -28,8 +28,11 @@ from pathlib import Path
 # csv's default 128 KB field cap so large (e.g. NIR) spectra parse.
 csv.field_size_limit(10**9)
 
-# ``sage`` is on PATH in the image; overridable for tests / non-standard installs.
-SAGE_BIN = os.environ.get("SNID_SAGE_BIN", "sage")
+# The CVMFS sandbox doesn't apply the image's PATH env, so call sage by its venv
+# absolute path when present (lets SNID run from CVMFS, not a per-node docker pull);
+# fall back to PATH for docker:// and tests. Overridable via SNID_SAGE_BIN.
+_SAGE_DEFAULT = "/opt/venv/bin/sage" if os.path.exists("/opt/venv/bin/sage") else "sage"
+SAGE_BIN = os.environ.get("SNID_SAGE_BIN", _SAGE_DEFAULT)
 # The image bakes a read-only template bank here; the job runs python directly
 # (bypassing the image entrypoint), so the bridge exposes it via writable scratch.
 BAKED_TEMPLATES = Path(os.environ.get("SNID_SAGE_BAKED_TEMPLATES", "/opt/snid_sage/templates"))

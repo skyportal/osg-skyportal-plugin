@@ -44,16 +44,16 @@ python register_analysis_service.py \
   --optional-params-json '{"wrapper": ["ngsf"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest", "docker://michaelwcoughlin/ngsf"], "spectrum_index": {"type": "number"}, "instrument": ["", "NGPS", "GHTS"], "n_results": {"type": "number", "default": 3}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
 
 # SNID-SAGE — spectral classification alternative to NGSF (spectrum_fitting). Its
-# image bakes in the template bank; the fit is single-threaded, ~min, <1 GB.
-# docker:// is the default: SNID needs its venv on PATH, which the CVMFS sandbox
-# invocation does not apply, so `sage` is not found from the CVMFS copy. The
-# CVMFS path (registry host stripped, unlike docker://) is kept as a fallback.
+# image bakes in the template bank; the fit is single-threaded, ~min, <1 GB. CVMFS
+# is the default: the bridge calls `sage` by its venv absolute path, so the CVMFS
+# sandbox works without the image's PATH env, and it avoids the per-node docker
+# convert+pull that made docker:// jobs re-pull on restart and time out.
 python register_analysis_service.py \
   --name SNID_OSG --display "SNID-SAGE (OSG)" \
   --listener-url http://localhost:7100/analysis/snid_osg \
   --analysis-type spectrum_fitting \
   --input-data-types spectra redshift \
-  --optional-params-json '{"wrapper": ["snid"], "singularity_image": ["docker://ghcr.io/fiorenst/snid-sage", "/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest"], "spectrum_index": {"type": "number"}, "free_redshift": ["False", "True"], "clip_host_lines": ["True", "False"], "n_results": {"type": "number", "default": 5}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
+  --optional-params-json '{"wrapper": ["snid"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest", "docker://ghcr.io/fiorenst/snid-sage"], "spectrum_index": {"type": "number"}, "free_redshift": ["False", "True"], "clip_host_lines": ["True", "False"], "n_results": {"type": "number", "default": 5}, "request_cpus": {"type": "number", "default": 1}, "request_memory": {"type": "number", "default": 2048}}'
 
 # jax-snana — SALT/BayeSN light-curve fitting (SALT3.DOVEKIE/K21, BAYESN.G26/W22).
 # Its image (containers/jax-snana.def -> OSDF .sif) ships the models and built-in

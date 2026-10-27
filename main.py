@@ -264,11 +264,11 @@ WRAPPER_DEFAULT_IMAGE = {
     # runs under `python`. gwdatafind/pelican come from the CVMFS igwn env.
     "pygrb": "/cvmfs/singularity.opensciencegrid.org/pycbc/pycbc-el8:latest",
     "ngsf": "/cvmfs/singularity.opensciencegrid.org/michaelwcoughlin/ngsf:latest",
-    # docker:// not CVMFS: SNID needs its venv (/opt/venv/bin) on PATH, which the
-    # docker image's env applies but the CVMFS sandbox invocation does not, so
-    # `sage` is not found from the CVMFS copy. NGSF runs python off the base PATH,
-    # so its CVMFS image is fine.
-    "snid": "docker://ghcr.io/fiorenst/snid-sage",
+    # SNID runs its venv's `sage` by absolute path (/opt/venv/bin/sage, set in
+    # snid_bridge), so the CVMFS sandbox works despite not applying the image's PATH
+    # env. CVMFS avoids the per-node docker convert+pull that made docker:// jobs
+    # re-pull on every OSPool restart and time out. docker:// is the fallback.
+    "snid": "/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest",
     "mosfit": "docker://ashleyvillar/mosfit",
     # CVMFS unpacked image: token-free (no OSDF auth, unlike an ospool .sif the
     # IGWN-token'd aframe job can't read) and no per-node docker convert. Synced
