@@ -269,7 +269,10 @@ WRAPPER_DEFAULT_IMAGE = {
     # env. CVMFS avoids the per-node docker convert+pull that made docker:// jobs
     # re-pull on every OSPool restart and time out. docker:// is the fallback.
     "snid": "/cvmfs/singularity.opensciencegrid.org/fiorenst/snid-sage:latest",
-    "mosfit": "docker://ashleyvillar/mosfit",
+    # MOSFiT physics SN fitter (ashleyvillar/mosfit, synced via cvmfs-singularity-sync);
+    # CVMFS avoids the per-node docker convert+pull that re-pulls on every OSPool
+    # restart and times out. docker://ashleyvillar/mosfit is the fallback.
+    "mosfit": "/cvmfs/singularity.opensciencegrid.org/ashleyvillar/mosfit:latest",
     # CVMFS unpacked image: token-free (no OSDF auth, unlike an ospool .sif the
     # IGWN-token'd aframe job can't read) and no per-node docker convert. Synced
     # from docker://ghcr.io/ml4gw/buoy/buoy:main.

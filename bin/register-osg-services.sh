@@ -25,14 +25,15 @@ python register_analysis_service.py \
   --input-data-types photometry redshift \
   --optional-params-json '{"source": ["arnett", "magnetar", "magnetar_nickel", "shock_cooling"], "backend": ["redback"], "fix_z": ["True", "False"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu", "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:latest", "docker://nsarinastro/redback-jax"], "request_gpus": {"type": "number", "default": 1}, "request_cpus": {"type": "number", "default": 4}, "request_memory": {"type": "number", "default": 24576}}'
 
-# MOSFiT — its own image (ashleyvillar/mosfit, built from the MOSFiT docker
-# branch: mosfit + CPU torch + baked ZTF filters). docker:// works per-job now;
-# prefer the CVMFS mirror once ashleyvillar/mosfit is added to the OSG sync list.
+# MOSFiT — its own image (ashleyvillar/mosfit: mosfit + CPU torch + baked ZTF
+# filters). CVMFS is the default (now synced): it avoids the per-node docker
+# convert+pull that re-pulls on OSPool restart and times out; docker:// is the
+# fallback. Emits model_lightcurve + posterior_samples like jax-snana.
 python register_analysis_service.py \
   --name MOSFiT_OSG --display "MOSFiT (OSG)" \
   --listener-url http://localhost:7100/analysis/mosfit_osg \
   --input-data-types photometry redshift \
-  --optional-params-json '{"source": ["default", "slsn", "magnetar", "csm", "csmni", "ia", "tde", "kilonova", "nsbh", "bns"], "wrapper": ["mosfit"], "singularity_image": ["docker://ashleyvillar/mosfit", "/cvmfs/singularity.opensciencegrid.org/ashleyvillar/mosfit:latest"], "fix_z": ["True", "False"]}'
+  --optional-params-json '{"source": ["default", "slsn", "magnetar", "csm", "csmni", "ia", "tde", "kilonova", "nsbh", "bns"], "wrapper": ["mosfit"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/ashleyvillar/mosfit:latest", "docker://ashleyvillar/mosfit"], "fix_z": ["True", "False"]}'
 
 # NGSF — the one service taking spectra, not photometry (spectrum_fitting). Its
 # image bakes in the template bank; the fit is ~4-5 min on one core, <1 GB.
