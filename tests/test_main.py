@@ -258,6 +258,35 @@ def test_require_gpus_constraint_applied(plugin_cfg, last_submit_desc):
     assert last_submit_desc["require_gpus"] == "DriverVersion >= 12.0"
 
 
+def test_redback_named_wrapper_defaults_to_gpu_image_and_slot(plugin_cfg, last_submit_desc):
+    """redback is its own named wrapper: a bare request gets its CVMFS GPU image
+    and a default request_gpus/memory, no per-request GPU params needed."""
+    main.submit_job(
+        plugin_cfg,
+        analysis_name="redback_osg",
+        resource_id="ZTF20abc",
+        callback_url=None,
+        callback_method="POST",
+        inputs={"analysis_parameters": {"wrapper": "redback", "backend": "redback"}},
+    )
+    assert last_submit_desc["request_gpus"] == "1"
+    assert last_submit_desc["request_memory"] == "24576MB"
+    assert (
+        last_submit_desc["+SingularityImage"]
+        == '"/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu"'
+    )
+
+
+def test_redback_wrapper_spec_ships_only_the_redback_bridge():
+    """The named redback wrapper reuses the fiesta JAX entrypoint but ships only
+    the redback bridge (the redback-jax image has no fiesta)."""
+    from pathlib import Path
+
+    name, files = main._wrapper_spec("redback", Path(main.__file__).parent)
+    assert name == "fiesta_wrapper.py"
+    assert {f.name for f in files} == {"fiesta_wrapper.py", "redback_bridge.py"}
+
+
 def test_no_gpu_params_stays_cpu_only(plugin_cfg, last_submit_desc):
     main.submit_job(
         plugin_cfg,

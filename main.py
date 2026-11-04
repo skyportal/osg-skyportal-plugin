@@ -293,6 +293,11 @@ WRAPPER_DEFAULT_IMAGE = {
     # cvmfs-singularity-sync; the package ships the models + built-in filters, so
     # no kcor. docker://ghcr.io/mattgrayling/jax-snana is the fallback.
     "jax_snana": "/cvmfs/singularity.opensciencegrid.org/mattgrayling/jax-snana:latest",
+    # redback-jax physics SN fitter (nsarinastro/redback-jax). The GPU image: the
+    # SMC fit is hours on CPU but seconds-to-minutes on a GPU, so it defaults to
+    # GPU (request_gpus via WRAPPER_DEFAULT_RESOURCES). docker://nsarinastro/redback-jax
+    # is the fallback; :latest is the CPU image for an explicit request_gpus=0.
+    "redback": "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu",
 }
 
 # The GW searches pull whole .gwf frame files (O4 hoft frames are ~1.5 GB each,
@@ -304,6 +309,9 @@ WRAPPER_DEFAULT_RESOURCES = {
     "aframe": {"request_disk": 16384, "request_memory": 8192, "max_runtime_seconds": 7200},
     # Uses ~1.5 GB of scratch; slots that enforce the 1 GB default hold the job.
     "fleet": {"request_disk": 3072},
+    # redback-jax defaults to a GPU (hours on CPU) and peaks ~17 GB; an explicit
+    # request_gpus=0 / request_memory still wins.
+    "redback": {"request_gpus": 1, "request_memory": 24576},
 }
 
 # wrapper -> (entrypoint, extra bridge/helper basenames). The single runtime
@@ -322,6 +330,10 @@ WRAPPER_FILES = {
     "oracle": ("oracle_wrapper.py", ["oracle_bridge.py"]),
     "fleet": ("fleet_wrapper.py", ["fleet_bridge.py"]),
     "jax_snana": ("jax_snana_wrapper.py", ["jax_snana_bridge.py"]),
+    # redback-jax reuses the shared fiesta JAX wrapper (backend=redback picks the
+    # bridge) but is its own named wrapper so it gets its own CVMFS image + GPU
+    # resources; ships only the redback bridge (the redback-jax image has no fiesta).
+    "redback": ("fiesta_wrapper.py", ["redback_bridge.py"]),
 }
 _FIESTA_FILES = ("fiesta_wrapper.py", ["fiesta_bridge.py", "redback_bridge.py"])
 
@@ -382,6 +394,7 @@ def _stage_wrapper_job(
         "oracle",
         "fleet",
         "jax_snana",
+        "redback",
     ) or params.get("use_wrapper", cfg.get("defaults", {}).get("use_wrapper", False))
     if not use_wrapper:
         return {}, None, []
@@ -679,7 +692,9 @@ def submit_job(
     submit_desc["+MaxRuntime"] = str(
         int(params.get("max_runtime_seconds", res["max_runtime_seconds"]))
     )
-    _apply_gpu_and_image(submit_desc, params, defaults)
+    # res carries per-wrapper resource floors (e.g. redback's default request_gpus),
+    # so GPU stamping matches the batch path.
+    _apply_gpu_and_image(submit_desc, params, res)
     # For IGWN-AP jobs the use_oauth_services/accounting/pools knobs come from the
     # igwn config block (a request param still wins).
     _apply_igwn_ap(submit_desc, params, {**defaults, **igwn} if igwn_ap else defaults)
@@ -1595,6 +1610,9 @@ class AnalysisHandler(tornado.web.RequestHandler):
                 elif "alma" in name:
                     params.setdefault("wrapper", "alma")
                 elif "redback" in name:
+                    # Its own named wrapper (own CVMFS image + GPU resources); the
+                    # backend selects the redback bridge inside the shared fiesta wrapper.
+                    params.setdefault("wrapper", "redback")
                     params.setdefault("backend", "redback")
 
         item = {

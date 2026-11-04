@@ -23,7 +23,7 @@ python register_analysis_service.py \
   --name Redback_OSG --display "Redback (OSG)" \
   --listener-url http://localhost:7100/analysis/redback_osg \
   --input-data-types photometry redshift \
-  --optional-params-json '{"source": ["arnett", "magnetar", "magnetar_nickel", "shock_cooling"], "backend": ["redback"], "fix_z": ["True", "False"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu", "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:latest", "docker://nsarinastro/redback-jax"], "request_gpus": {"type": "number", "default": 1}, "request_cpus": {"type": "number", "default": 4}, "request_memory": {"type": "number", "default": 24576}}'
+  --optional-params-json '{"source": ["arnett", "magnetar", "magnetar_nickel", "shock_cooling"], "wrapper": ["redback"], "backend": ["redback"], "fix_z": ["True", "False"], "singularity_image": ["/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:gpu", "/cvmfs/singularity.opensciencegrid.org/nsarinastro/redback-jax:latest", "docker://nsarinastro/redback-jax"], "request_gpus": {"type": "number", "default": 1}, "request_cpus": {"type": "number", "default": 4}, "request_memory": {"type": "number", "default": 24576}}'
 
 # MOSFiT — its own image (ashleyvillar/mosfit: mosfit + CPU torch + baked ZTF
 # filters). CVMFS is the default (now synced): it avoids the per-node docker
