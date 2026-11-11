@@ -53,9 +53,11 @@ services:
                     gpu_requirements: ""
                     # Per-GPU property constraint (HTCondor require_gpus), applied
                     # when request_gpus>0. The CUDA-13 jax wheels need a driver
-                    # supporting CUDA 13; older-driver nodes assign a GPU but fail
-                    # CUDA init. "" disables. Clear this if GPU jobs stop matching.
-                    require_gpus: "DriverVersion >= 13.0"
+                    # supporting CUDA 13 (older-driver nodes assign a GPU but fail
+                    # CUDA init), and CUDA 13 dropped Volta/Pascal, so the arch must
+                    # be >= 7.5 (Turing+) or the XLA compile aborts with
+                    # NVJITLINK_ERROR_UNSUPPORTED_ARCH. "" disables.
+                    require_gpus: "(DriverVersion >= 13.0) && (Capability >= 7.5)"
                     # CUDA .sif (containers/fiesta-gpu.def). When set, physics and
                     # surrogate fiesta/redback sources auto-route to a GPU with this
                     # image (they are ~hours on CPU and blow the analysis timeout, but
