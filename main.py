@@ -1721,7 +1721,7 @@ class AnalysisHandler(tornado.web.RequestHandler):
             if max_waiting is not None and len(_WAITING) >= max_waiting:
                 self.set_status(429)
                 self.set_header("Retry-After", "60")
-                self.write({"error": "rate-limited", "reason": cap_reason or "waiting list full"})
+                self.write({"error": "rate-limited", "reason": "waiting list full"})
                 return
             _WAITING.append(item)
             waiting = cap_reason or "behind earlier requests"
